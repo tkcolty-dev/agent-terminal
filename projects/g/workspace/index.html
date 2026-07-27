@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neon Salvage</title>
+<style>
+  :root {
+    --cyan: #4df3ff;
+    --pink: #ff3ec8;
+    --amber: #ffcf4d;
+    --bg0: #050510;
+    --bg1: #0b0b20;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: radial-gradient(ellipse at center, var(--bg1) 0%, var(--bg0) 70%);
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #eafcff;
+  }
+  #wrap {
+    position: relative;
+    width: 100vw; height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    background: transparent;
+    max-width: 100vw; max-height: 100vh;
+    display: block;
+    box-shadow: 0 0 60px rgba(77,243,255,0.15) inset;
+  }
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between;
+    padding: 14px 22px;
+    font-size: 15px;
+    letter-spacing: 0.5px;
+    text-shadow: 0 0 8px rgba(77,243,255,0.8);
+    pointer-events: none;
+    z-index: 5;
+  }
+  #hud .stat { margin-right: 22px; }
+  #hud .label { color: #7fd9e0; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; }
+  #hud .val { font-size: 20px; font-weight: 700; }
+  #fuelBarOuter {
+    width: 140px; height: 10px; border: 1px solid var(--cyan);
+    border-radius: 6px; overflow: hidden; margin-top: 4px;
+    background: rgba(255,255,255,0.05);
+  }
+  #fuelBarInner {
+    height: 100%; width: 100%;
+    background: linear-gradient(90deg, var(--cyan), var(--pink));
+    transition: width 0.15s linear;
+  }
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(3,3,12,0.82);
+    z-index: 10;
+    text-align: center;
+    padding: 20px;
+  }
+  #overlay.hidden { display: none; }
+  #overlay h1 {
+    font-size: clamp(28px, 6vw, 52px);
+    margin: 0 0 6px;
+    letter-spacing: 3px;
+    color: var(--cyan);
+    text-shadow: 0 0 20px var(--cyan), 0 0 40px rgba(77,243,255,0.5);
+  }
+  #overlay .sub {
+    color: var(--pink);
+    text-shadow: 0 0 10px var(--pink);
+    font-size: 14px;
+    letter-spacing: 2px;
+    margin-bottom: 22px;
+  }
+  #overlay p.msg { max-width: 420px; line-height: 1.6; color: #b9e8ee; font-size: 14px; margin: 0 0 20px; }
+  #overlay .scoreLine { font-size: 18px; margin: 4px 0; color: var(--amber); }
+  button.btn {
+    background: linear-gradient(135deg, var(--cyan), #2199ff);
+    border: none; color: #041018; font-weight: 700;
+    padding: 12px 30px; border-radius: 8px; font-size: 16px;
+    cursor: pointer; letter-spacing: 1px;
+    box-shadow: 0 0 22px rgba(77,243,255,0.5);
+    transition: transform 0.1s ease;
+  }
+  button.btn:hover { transform: scale(1.05); }
+  button.btn:active { transform: scale(0.97); }
+  .keys {
+    margin-top: 18px; font-size: 12px; color: #7fa9b0; letter-spacing: 0.5px;
+  }
+  .keys kbd {
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 4px; padding: 2px 7px; margin: 0 2px; font-size: 11px;
+  }
+  #touchControls {
+    position: absolute; bottom: 16px; left: 0; right: 0;
+    display: none;
+    justify-content: space-between;
+    padding: 0 16px;
+    z-index: 6;
+  }
+  .tbtn {
+    width: 64px; height: 64px; border-radius: 50%;
+    background: rgba(77,243,255,0.12); border: 1px solid var(--cyan);
+    color: var(--cyan); font-size: 22px; display: flex; align-items: center; justify-content: center;
+    user-select: none; -webkit-user-select: none;
+  }
+  #grappleBtn {
+    background: rgba(255,62,200,0.15); border-color: var(--pink); color: var(--pink);
+    width: 78px; height: 78px; font-size: 14px; font-weight: 700;
+  }
+  @media (max-width: 820px), (hover: none) {
+    #touchControls { display: flex; }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="600"></canvas>
+
+  <div id="hud">
+    <div style="display:flex;">
+      <div class="stat">
+        <div class="label">Score</div>
+        <div class="val" id="scoreVal">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Best</div>
+        <div class="val" id="bestVal">0</div>
+      </div>
+    </div>
+    <div class="stat" style="text-align:right;">
+      <div class="label">Fuel</div>
+      <div id="fuelBarOuter"><div id="fuelBarInner"></div></div>
+    </div>
+  </div>
+
+  <div id="overlay">
+    <h1>NEON SALVAGE</h1>
+    <div class="sub">GRAPPLE &middot; HAUL &middot; SURVIVE</div>
+    <p class="msg">Pilot your salvage tug through the drift field. Fly close to glowing cargo pods and hold <kbd>Space</kbd> (or the grapple button) to reel them in. Dock cargo at your ship's home glow before fuel runs out. Dodge debris &mdash; it ends your run.</p>
+    <div id="startScoreLine" class="scoreLine" style="display:none;"></div>
+    <button class="btn" id="startBtn">Launch Tug</button>
+    <div class="keys">
+      <kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd> or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to fly &nbsp;&middot;&nbsp; <kbd>Space</kbd> to grapple
+    </div>
+  </div>
+
+  <div id="touchControls">
+    <div id="stickZone" style="position:relative; width:120px; height:120px;">
+      <div class="tbtn" id="thumbStick" style="width:100%; height:100%; border-radius:50%;">&#10021;</div>
+    </div>
+    <div class="tbtn" id="grappleBtn">GRAPPLE</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  const scoreVal = document.getElementById('scoreVal');
+  const bestVal = document.getElementById('bestVal');
+  const fuelBarInner = document.getElementById('fuelBarInner');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const startScoreLine = document.getElementById('startScoreLine');
+  const grappleBtn = document.getElementById('grappleBtn');
+  const thumbStick = document.getElementById('thumbStick');
+  const stickZone = document.getElementById('stickZone');
+
+  const BEST_KEY = 'neonSalvageBest';
+  let best = parseInt(localStorage.getItem(BEST_KEY) || '0', 10);
+  bestVal.textContent = best;
+
+  const HOME = { x: 80, y: H / 2, r: 46 };
+
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.key.toLowerCase()] = true;
+    if (e.key === ' ') { e.preventDefault(); grappleHeld = true; }
+  });
+  window.addEventListener('keyup', e => {
+    keys[e.key.toLowerCase()] = false;
+    if (e.key === ' ') grappleHeld = false;
+  });
+
+  let grappleHeld = false;
+  let stickVec = { x: 0, y: 0 };
+  let stickActive = false;
+  let stickOrigin = null;
+
+  function stickFromEvent(clientX, clientY) {
+    const rect = stickZone.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    let dx = clientX - cx, dy = clientY - cy;
+    const max = rect.width / 2;
+    const dist = Math.hypot(dx, dy);
+    if (dist > max) { dx = dx / dist * max; dy = dy / dist * max; }
+    stickVec.x = dx / max; stickVec.y = dy / max;
+    thumbStick.style.transform = `translate(${dx * 0.4}px, ${dy * 0.4}px)`;
+  }
+  stickZone.addEventListener('touchstart', e => { stickActive = true; const t = e.touches[0]; stickFromEvent(t.clientX, t.clientY); e.preventDefault(); }, {passive:false});
+  stickZone.addEventListener('touchmove', e => { if (!stickActive) return; const t = e.touches[0]; stickFromEvent(t.clientX, t.clientY); e.preventDefault(); }, {passive:false});
+  stickZone.addEventListener('touchend', e => { stickActive = false; stickVec = {x:0,y:0}; thumbStick.style.transform = 'translate(0,0)'; e.preventDefault(); }, {passive:false});
+  grappleBtn.addEventListener('touchstart', e => { grappleHeld = true; e.preventDefault(); }, {passive:false});
+  grappleBtn.addEventListener('touchend', e => { grappleHeld = false; e.preventDefault(); }, {passive:false});
+
+  function rand(min, max) { return Math.random() * (max - min) + min; }
+
+  let ship, cargos, debris, particles, running, score, fuel, spawnTimer, debrisTimer, carrying, time;
+
+  function resetGame() {
+    ship = { x: W / 2, y: H / 2, vx: 0, vy: 0, angle: 0, r: 14 };
+    cargos = [];
+    debris = [];
+    particles = [];
+    running = true;
+    score = 0;
+    fuel = 100;
+    spawnTimer = 0;
+    debrisTimer = 0;
+    carrying = null;
+    time = 0;
+    for (let i = 0; i < 3; i++) spawnCargo();
+    for (let i = 0; i < 2; i++) spawnDebris();
+  }
+
+  function spawnCargo() {
+    let x, y;
+    do {
+      x = rand(200, W - 60);
+      y = rand(60, H - 60);
+    } while (Math.hypot(x - HOME.x, y - HOME.y) < 150);
+    cargos.push({
+      x, y, r: 12,
+      vx: rand(-0.3, 0.3), vy: rand(-0.3, 0.3),
+      value: [10, 20, 35][Math.floor(Math.random() * 3)],
+      hue: [190, 320, 45][Math.floor(Math.random() * 3)],
+      grabbed: false,
+      pulse: Math.random() * Math.PI * 2
+    });
+  }
+
+  function spawnDebris() {
+    const edge = Math.floor(Math.random() * 4);
+    let x, y;
+    if (edge === 0) { x = -30; y = rand(0, H); }
+    else if (edge === 1) { x = W + 30; y = rand(0, H); }
+    else if (edge === 2) { x = rand(0, W); y = -30; }
+    else { x = rand(0, W); y = H + 30; }
+    const ang = Math.atan2(H / 2 - y, W / 2 - x) + rand(-0.6, 0.6);
+    const speed = rand(0.6, 1.6);
+    debris.push({
+      x, y, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed,
+      r: rand(10, 24), rot: 0, rotSpeed: rand(-0.03, 0.03),
+      spikes: 5 + Math.floor(Math.random() * 3)
+    });
+  }
+
+  function addParticle(x, y, hue, count) {
+    for (let i = 0; i < count; i++) {
+      particles.push({
+        x, y,
+        vx: rand(-2, 2), vy: rand(-2, 2),
+        life: 1, hue
+      });
+    }
+  }
+
+  function update(dt) {
+    time += dt;
+    // input
+    let ax = 0, ay = 0;
+    if (keys['arrowup'] || keys['w']) ay -= 1;
+    if (keys['arrowdown'] || keys['s']) ay += 1;
+    if (keys['arrowleft'] || keys['a']) ax -= 1;
+    if (keys['arrowright'] || keys['d']) ax += 1;
+    if (stickActive) { ax += stickVec.x; ay += stickVec.y; }
+
+    const len = Math.hypot(ax, ay);
+    if (len > 0) { ax /= len; ay /= len; }
+    const thrust = 0.28;
+    ship.vx += ax * thrust;
+    ship.vy += ay * thrust;
+    ship.vx *= 0.96;
+    ship.vy *= 0.96;
+    ship.x += ship.vx;
+    ship.y += ship.vy;
+    ship.x = Math.max(ship.r, Math.min(W - ship.r, ship.x));
+    ship.y = Math.max(ship.r, Math.min(H - ship.r, ship.y));
+    if (len > 0) ship.angle = Math.atan2(ay, ax);
+
+    if (len > 0 && Math.random() < 0.6) {
+      addParticle(ship.x - Math.cos(ship.angle) * 16, ship.y - Math.sin(ship.angle) * 16, 195, 1);
+    }
+
+    // fuel drains, faster while carrying
+    fuel -= dt * (carrying ? 2.4 : 1.4);
+    if (fuel <= 0) { fuel = 0; endGame(); return; }
+
+    // grapple
+    if (!carrying && grappleHeld) {
+      for (const c of cargos) {
+        if (c.grabbed) continue;
+        const d = Math.hypot(c.x - ship.x, c.y - ship.y);
+        if (d < 70) {
+          c.grabbed = true;
+          carrying = c;
+          break;
+        }
+      }
+    }
+
+    if (carrying) {
+      const targetX = ship.x - Math.cos(ship.angle) * 26;
+      const targetY = ship.y - Math.sin(ship.angle) * 26;
+      carrying.x += (targetX - carrying.x) * 0.3;
+      carrying.y += (targetY - carrying.y) * 0.3;
+      if (!grappleHeld) {
+        carrying.grabbed = false;
+        carrying.vx = ship.vx * 0.5;
+        carrying.vy = ship.vy * 0.5;
+        carrying = null;
+      } else {
+        const dHome = Math.hypot(ship.x - HOME.x, ship.y - HOME.y);
+        if (dHome < HOME.r) {
+          score += carrying.value;
+          fuel = Math.min(100, fuel + 12);
+          addParticle(carrying.x, carrying.y, carrying.hue, 24);
+          cargos = cargos.filter(c => c !== carrying);
+          carrying = null;
+          spawnCargo();
+        }
+      }
+    }
+
+    // free-floating cargo drift
+    for (const c of cargos) {
+      if (c.grabbed) continue;
+      c.x += c.vx; c.y += c.vy;
+      c.pulse += dt * 3;
+      if (c.x < c.r || c.x > W - c.r) c.vx *= -1;
+      if (c.y < c.r || c.y > H - c.r) c.vy *= -1;
+    }
+
+    // debris
+    for (const d of debris) {
+      d.x += d.vx; d.y += d.vy;
+      d.rot += d.rotSpeed;
+    }
+    debris = debris.filter(d => d.x > -80 && d.x < W + 80 && d.y > -80 && d.y < H + 80);
+
+    debrisTimer += dt;
+    const debrisInterval = Math.max(1.0, 2.6 - time * 0.01);
+    if (debrisTimer > debrisInterval) { debrisTimer = 0; spawnDebris(); }
+
+    spawnTimer += dt;
+    if (cargos.length < 4 && spawnTimer > 2.5) { spawnTimer = 0; spawnCargo(); }
+
+    // collisions with debris
+    for (const d of debris) {
+      const dist = Math.hypot(d.x - ship.x, d.y - ship.y);
+      if (dist < d.r + ship.r - 4) {
+        addParticle(ship.x, ship.y, 0, 30);
+        endGame();
+        return;
+      }
+    }
+
+    // particles
+    for (const p of particles) {
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.94; p.vy *= 0.94;
+      p.life -= dt * 1.6;
+    }
+    particles = particles.filter(p => p.life > 0);
+
+    scoreVal.textContent = score;
+    fuelBarInner.style.width = fuel + '%';
+    fuelBarInner.style.background = fuel < 25
+      ? 'linear-gradient(90deg,#ff3ec8,#ff5050)'
+      : 'linear-gradient(90deg,#4df3ff,#ff3ec8)';
+  }
+
+  function drawStarfield() {
+    ctx.fillStyle = '#050510';
+    ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    for (let i = 0; i < 90; i++) {
+      const sx = (i * 137.5) % W;
+      const sy = (i * 91.3 + time * 6) % H;
+      ctx.globalAlpha = 0.15 + 0.5 * ((Math.sin(i + time) + 1) / 2);
+      ctx.fillStyle = '#bfefff';
+      ctx.fillRect(sx, sy, 1.6, 1.6);
+    }
+    ctx.restore();
+  }
+
+  function drawHome() {
+    const pulse = 1 + Math.sin(time * 2) * 0.06;
+    ctx.save();
+    ctx.translate(HOME.x, HOME.y);
+    const grad = ctx.createRadialGradient(0, 0, 4, 0, 0, HOME.r * pulse);
+    grad.addColorStop(0, 'rgba(77,243,255,0.55)');
+    grad.addColorStop(1, 'rgba(77,243,255,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(0, 0, HOME.r * pulse, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#4df3ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, 0, 28, 0, Math.PI * 2); ctx.stroke();
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = '#8fe9f5';
+    ctx.textAlign = 'center';
+    ctx.fillText('HOME', 0, 46);
+    ctx.restore();
+  }
+
+  function drawShip() {
+    ctx.save();
+    ctx.translate(ship.x, ship.y);
+    ctx.rotate(ship.angle);
+    ctx.shadowColor = '#4df3ff';
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = '#dffcff';
+    ctx.beginPath();
+    ctx.moveTo(16, 0);
+    ctx.lineTo(-12, 10);
+    ctx.lineTo(-6, 0);
+    ctx.lineTo(-12, -10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#4df3ff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+
+    if (carrying) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,62,200,0.7)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ship.x, ship.y);
+      ctx.lineTo(carrying.x, carrying.y);
+      ctx.stroke();
+      ctx.restore();
+    } else if (grappleHeld) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,62,200,0.35)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(ship.x, ship.y, 70, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawCargos() {
+    for (const c of cargos) {
+      const glow = 1 + Math.sin(c.pulse) * 0.25;
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.shadowColor = `hsl(${c.hue},100%,65%)`;
+      ctx.shadowBlur = 12 * glow;
+      ctx.fillStyle = `hsl(${c.hue},90%,60%)`;
+      ctx.beginPath();
+      ctx.arc(0, 0, c.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.globalAlpha = 0.6;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawDebris() {
+    for (const d of debris) {
+      ctx.save();
+      ctx.translate(d.x, d.y);
+      ctx.rotate(d.rot);
+      ctx.strokeStyle = '#9aa0b5';
+      ctx.fillStyle = '#2a2d3d';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let i = 0; i < d.spikes; i++) {
+        const a = (i / d.spikes) * Math.PI * 2;
+        const rr = d.r * (0.7 + (i % 2) * 0.3);
+        const px = Math.cos(a) * rr, py = Math.sin(a) * rr;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(p.life, 0);
+      ctx.fillStyle = `hsl(${p.hue},100%,70%)`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function draw() {
+    drawStarfield();
+    drawHome();
+    drawCargos();
+    drawDebris();
+    drawParticles();
+    drawShip();
+  }
+
+  let lastT = null;
+  function loop(t) {
+    if (!running) return;
+    if (lastT === null) lastT = t;
+    const dt = Math.min(0.05, (t - lastT) / 1000);
+    lastT = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function endGame() {
+    running = false;
+    if (score > best) {
+      best = score;
+      localStorage.setItem(BEST_KEY, String(best));
+    }
+    bestVal.textContent = best;
+    startScoreLine.style.display = 'block';
+    startScoreLine.textContent = `Run ended — Score: ${score}  (Best: ${best})`;
+    document.getElementById('startBtn').textContent = 'Launch Again';
+    overlay.classList.remove('hidden');
+  }
+
+  startBtn.addEventListener('click', () => {
+    overlay.classList.add('hidden');
+    resetGame();
+    lastT = null;
+    requestAnimationFrame(loop);
+  });
+})();
+</script>
+</body>
+</html>

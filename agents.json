@@ -1,0 +1,34 @@
+[
+ {
+  "id": "claude",
+  "name": "Claude",
+  "color": "#ff9668",
+  "type": "claude",
+  "model": "claude (loading…)"
+ },
+ {
+  "id": "codex",
+  "name": "Codex",
+  "color": "#58c4dc",
+  "type": "codex",
+  "model": "gpt-5 · codex-cli 0.145"
+ },
+ {
+  "id": "haiku",
+  "name": "Haiku",
+  "color": "#d2a8ff",
+  "type": "claude",
+  "model": "claude-haiku-4-5",
+  "modelFlag": "claude-haiku-4-5-20251001",
+  "limit": null
+ },
+ {
+  "id": "scout",
+  "name": "Scout",
+  "color": "#7ee787",
+  "type": "claude",
+  "model": "claude-sonnet-5",
+  "modelFlag": "claude-sonnet-5",
+  "limit": null
+ }
+]

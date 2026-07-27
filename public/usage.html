@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>USAGE — Agent Terminal</title>
+<style>
+  :root {
+    --bg: #0a0e14; --panel: #0f141c; --panel2: #131a24; --border: #1e2836;
+    --text: #c8d3e0; --dim: #5c6b80; --green: #7ee787; --warn: #febc2e; --red: #ff5f57;
+    --blue: #79c0ff; --purple: #d2a8ff; --orange: #ff9668; --cyan: #58c4dc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #05070a; color: var(--text); font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 13px; padding: 24px; }
+  .wrap { max-width: 1150px; margin: 0 auto; }
+  h1 { font-size: 14px; letter-spacing: 3px; color: var(--dim); margin-bottom: 4px; }
+  .sub { color: var(--dim); font-size: 11px; margin-bottom: 20px; }
+  .sub a { color: var(--green); text-decoration: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; margin-bottom: 26px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .card h2 { font-size: 10.5px; letter-spacing: 2px; color: var(--dim); margin-bottom: 10px; }
+  .card .flex { display: flex; align-items: center; gap: 16px; }
+  .kvs { flex: 1; min-width: 0; }
+  .kv { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 11.5px; }
+  .kv .k { color: var(--dim); white-space: nowrap; }
+  .kv .v { text-align: right; }
+  .ok { color: var(--green); } .warn { color: var(--warn); } .bad { color: var(--red); }
+
+  /* donut wheels */
+  .donut { width: 116px; height: 116px; flex: none; }
+  .donut .track { stroke: var(--panel2); }
+  .donut .arc { animation: sweep 1.1s cubic-bezier(.25,.8,.3,1) forwards; }
+  @keyframes sweep { from { stroke-dashoffset: var(--c); } to { stroke-dashoffset: var(--o); } }
+  .dtxt { fill: var(--text); font-size: 19px; font-weight: 700; font-family: inherit; }
+  .dsub { fill: var(--dim); font-size: 8.5px; font-family: inherit; letter-spacing: .5px; }
+
+  /* sliding bars */
+  .section { font-size: 11px; letter-spacing: 2px; color: var(--dim); margin: 26px 0 12px; }
+  .barrow { margin-bottom: 12px; }
+  .barlbl { display: flex; justify-content: space-between; font-size: 11.5px; margin-bottom: 4px; }
+  .barlbl .pct { color: var(--dim); }
+  .hbar { height: 12px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .hbar > div { height: 100%; border-radius: 6px; width: 0; animation: grow 1s cubic-bezier(.25,.8,.3,1) forwards; }
+  @keyframes grow { to { width: var(--w); } }
+
+  table { border-collapse: collapse; width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th, td { padding: 8px 14px; text-align: left; font-size: 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 600; font-size: 10px; letter-spacing: 1.5px; background: var(--panel2); }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; }
+  .proj { color: var(--dim); font-size: 11px; }
+  .agent-name { font-weight: 700; }
+  .note { color: var(--dim); font-size: 11px; margin-top: 18px; line-height: 1.6; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3a4a5e; margin-right: 7px; vertical-align: middle; }
+  .spinwheel { display: inline-block; width: 10px; height: 10px; border: 2px solid rgba(40,200,64,.25); border-top-color: var(--green); border-radius: 50%; margin-right: 6px; vertical-align: middle; animation: rot .8s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>USAGE &amp; PLANS</h1>
+  <div class="sub">auto-refreshes every 5s · <a href="/">← back to terminal</a> · last updated <span id="upd">…</span></div>
+
+  <div class="cards" id="cards">loading…</div>
+
+  <div class="section">SPEND BY PROJECT <span style="letter-spacing:0">(share of all tokens)</span></div>
+  <div id="projBars">loading…</div>
+
+  <div class="section">AGENT TOTALS ACROSS ALL PROJECTS</div>
+  <div id="agentBars">loading…</div>
+
+  <div class="section">FULL DETAIL</div>
+  <div id="tableWrap">loading…</div>
+
+  <div class="note">
+    <b>How billing works:</b> Claude-family agents spend from your <b>Claude plan</b> — the window wheel is live from Anthropic's rate-limit headers (time until your usage window resets; a used-% wheel appears when the CLI reports utilization).
+    Codex spends from your <b>ChatGPT plan</b>; OpenAI doesn't expose remaining quota via CLI, so its wheel shows Codex's share of terminal tokens.
+    Token counts include cheap cached re-reads — the $ estimate (reported by the Claude CLI itself) is the number that matters.
+  </div>
+</div>
+<script>
+function kfmt(n) { return n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(Math.round(n)||0); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function ago(ts) {
+  if (!ts) return '—';
+  const s = Math.floor((Date.now()-ts)/1000);
+  return s < 60 ? s+'s ago' : s < 3600 ? Math.floor(s/60)+'m ago' : Math.floor(s/3600)+'h ago';
+}
+function donut(pct, color, center, sub) {
+  const r = 46, c = (2 * Math.PI * r).toFixed(1);
+  const off = (c * (1 - Math.min(100, Math.max(0, pct)) / 100)).toFixed(1);
+  return `<svg class="donut" viewBox="0 0 116 116">
+    <circle class="track" cx="58" cy="58" r="${r}" fill="none" stroke-width="13"/>
+    <circle class="arc" cx="58" cy="58" r="${r}" fill="none" stroke="${color}" stroke-width="13"
+      stroke-linecap="round" stroke-dasharray="${c}" transform="rotate(-90 58 58)"
+      style="--c:${c};--o:${off};stroke-dashoffset:${off}"/>
+    <text class="dtxt" x="58" y="56" text-anchor="middle">${center}</text>
+    <text class="dsub" x="58" y="72" text-anchor="middle">${sub||''}</text>
+  </svg>`;
+}
+function bar(label, pct, color, right) {
+  return `<div class="barrow">
+    <div class="barlbl"><span>${label}</span><span class="pct">${right} · ${pct.toFixed(1)}%</span></div>
+    <div class="hbar"><div style="--w:${Math.max(1.5, pct)}%;background:${color}"></div></div>
+  </div>`;
+}
+const WINDOW_LEN = { five_hour: 5*3600, seven_day: 7*86400, weekly: 7*86400, daily: 86400 };
+
+let lastCardsKey = '', lastBarsKey = '';
+async function refresh() {
+  let d;
+  try { d = await (await fetch('/usage.json')).json(); } catch { return; }
+  document.getElementById('upd').textContent = new Date(d.updated).toLocaleTimeString();
+
+  let claudeFresh = 0, claudeCached = 0, claudeCost = 0, codexFresh = 0, codexCached = 0, turns = 0;
+  const perAgent = {};
+  for (const r of d.rooms) for (const a of r.agents) {
+    turns += a.stats?.turns || 0;
+    const fresh = (a.tokens.in||0)+(a.tokens.out||0), cached = a.tokens.cached||0;
+    if (a.type === 'codex') { codexFresh += fresh; codexCached += cached; }
+    else { claudeFresh += fresh; claudeCached += cached; claudeCost += a.tokens.cost||0; }
+    if (!perAgent[a.id]) perAgent[a.id] = { name: a.name, color: a.color, tok: 0, cost: 0, turns: 0 };
+    perAgent[a.id].tok += fresh; perAgent[a.id].cost += a.tokens.cost||0; perAgent[a.id].turns += a.stats?.turns||0;
+  }
+  const totalFresh = (claudeFresh + codexFresh) || 1;
+  const total = totalFresh; // bars & shares use REAL tokens (fresh work), not cached re-reads
+
+  // ---- cards with wheels (only re-render when values change, so wheels don't restart every 5s)
+  const rl = d.rateLimit;
+  const cardsKey = JSON.stringify([claudeFresh, claudeCached, claudeCost, codexFresh, codexCached, rl]);
+  if (cardsKey !== lastCardsKey) {
+    lastCardsKey = cardsKey;
+    let planWheel, planRows;
+    if (rl && rl.utilization != null) {
+      const used = Math.round(rl.utilization);
+      planWheel = donut(used, used > 85 ? 'var(--red)' : used > 60 ? 'var(--warn)' : 'var(--green)', used + '%', 'WINDOW USED');
+    } else if (rl && rl.resetsAt && WINDOW_LEN[rl.rateLimitType]) {
+      const len = WINDOW_LEN[rl.rateLimitType];
+      const leftS = Math.max(0, rl.resetsAt - Date.now()/1000);
+      const leftPct = Math.min(100, leftS / len * 100);
+      const h = Math.floor(leftS/3600), m = Math.round((leftS%3600)/60);
+      planWheel = donut(leftPct, 'var(--green)', (h ? h+'h'+String(m).padStart(2,'0') : m+'m'), 'TIL WINDOW RESET');
+    } else {
+      planWheel = donut(0, 'var(--green)', '—', 'NO DATA YET');
+    }
+    if (rl) {
+      const ok = rl.status === 'allowed';
+      const resets = rl.resetsAt ? new Date(rl.resetsAt*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '?';
+      planRows =
+        `<div class="kv"><span class="k">status</span><span class="v ${ok?'ok':'bad'}">${ok?'● allowed':'▲ '+esc(rl.status)}</span></div>` +
+        `<div class="kv"><span class="k">window</span><span class="v">${esc((rl.rateLimitType||'').replace(/_/g,' '))} · resets ${resets}</span></div>` +
+        `<div class="kv"><span class="k">overage</span><span class="v">${esc(rl.overageStatus||'n/a')}${rl.isUsingOverage?' ⚠ in use':''}</span></div>`;
+    } else {
+      planRows = `<div class="kv"><span class="k">status</span><span class="v warn">no turns yet this session</span></div>`;
+    }
+    document.getElementById('cards').innerHTML = `
+      <div class="card"><h2>CLAUDE PLAN — fable · sonnet · haiku</h2>
+        <div class="flex">${planWheel}<div class="kvs">
+          <div class="kv"><span class="k">plan value used</span><span class="v"><b>~$${claudeCost.toFixed(2)}</b> <span class="k">(covered by plan)</span></span></div>
+          <div class="kv"><span class="k">real tokens</span><span class="v">${kfmt(claudeFresh)}</span></div>
+          <div class="kv"><span class="k">cached re-reads</span><span class="v k">${kfmt(claudeCached)} (cheap)</span></div>
+          ${planRows}
+        </div></div></div>
+      <div class="card"><h2>CHATGPT PLAN — codex · gpt-5</h2>
+        <div class="flex">${donut(codexFresh/total*100, 'var(--cyan)', Math.round(codexFresh/total*100)+'%', 'OF REAL TOKENS')}<div class="kvs">
+          <div class="kv"><span class="k">real tokens</span><span class="v"><b>${kfmt(codexFresh)}</b></span></div>
+          <div class="kv"><span class="k">cached re-reads</span><span class="v k">${kfmt(codexCached)} (cheap)</span></div>
+          <div class="kv"><span class="k">billing</span><span class="v">ChatGPT subscription</span></div>
+          <div class="kv"><span class="k">quota left</span><span class="v k">not exposed by CLI</span></div>
+        </div></div></div>
+      <div class="card"><h2>ALL PROJECTS</h2>
+        <div class="flex">${donut(claudeFresh/total*100, 'var(--orange)', kfmt(totalFresh), 'REAL TOKENS')}<div class="kvs">
+          <div class="kv"><span class="k">plan value used</span><span class="v"><b>~$${d.global.cost.toFixed(2)}</b></span></div>
+          <div class="kv"><span class="k">claude / codex</span><span class="v">${kfmt(claudeFresh)} / ${kfmt(codexFresh)}</span></div>
+          <div class="kv"><span class="k">agent turns</span><span class="v">${turns}</span></div>
+          <div class="kv"><span class="k">projects</span><span class="v">${d.rooms.length}</span></div>
+        </div></div></div>`;
+  }
+
+  // ---- sliding bars (re-render only on change)
+  const barsKey = JSON.stringify([d.rooms.map(r => r.usage), perAgent]);
+  if (barsKey !== lastBarsKey) {
+    lastBarsKey = barsKey;
+    const palette = ['var(--orange)','var(--cyan)','var(--purple)','var(--green)','var(--blue)','var(--warn)'];
+    const sorted = [...d.rooms].sort((a,b) => b.usage.tok - a.usage.tok);
+    document.getElementById('projBars').innerHTML = sorted.map((r, i) =>
+      bar(esc(r.id), r.usage.tok/total*100, palette[i % palette.length],
+          `${kfmt(r.usage.tok)} tok${r.usage.cost ? ' · ~$'+r.usage.cost.toFixed(2) : ''}`)
+    ).join('') || '<span class="proj">nothing yet</span>';
+    const agents = Object.values(perAgent).sort((a,b) => b.tok - a.tok);
+    document.getElementById('agentBars').innerHTML = agents.map(a =>
+      bar(`<b style="color:${a.color}">${esc(a.name)}</b>`, a.tok/total*100, a.color,
+          `${a.turns} turns · ${kfmt(a.tok)} tok${a.cost ? ' · ~$'+a.cost.toFixed(2) : ''}`)
+    ).join('');
+  }
+
+  // ---- detail table
+  let rows = '';
+  for (const r of d.rooms) {
+    rows += `<tr><td colspan="4" class="proj">▸ ${esc(r.id)}</td><td class="num proj">${kfmt(r.usage.tok)}</td><td class="num proj">${r.usage.cost?'~$'+r.usage.cost.toFixed(2):''}</td><td></td></tr>`;
+    for (const a of r.agents) {
+      const t = a.tokens, s = a.stats || {};
+      if (!(t.in||t.out||s.turns)) continue;
+      const busy = a.status !== 'idle';
+      rows += `<tr>
+        <td>${busy ? '<span class="spinwheel"></span>' : '<span class="dot"></span>'}<span class="agent-name" style="color:${a.color}">${esc(a.name)}</span></td>
+        <td>${esc(a.model)}</td>
+        <td class="num">${s.turns||0}</td>
+        <td class="num">${s.files||0} files · ${s.cmds||0} cmds · ${s.searches||0} 🌐</td>
+        <td class="num">${kfmt((t.in||0)+(t.out||0))} <span class="proj">(${((((t.in||0)+(t.out||0))/total)*100).toFixed(1)}%)</span></td>
+        <td class="num">${t.cost?'~$'+t.cost.toFixed(2):'—'}</td>
+        <td class="num">${ago(s.lastActive)}</td>
+      </tr>`;
+    }
+  }
+  document.getElementById('tableWrap').innerHTML =
+    `<table><tr><th>AGENT</th><th>MODEL</th><th class="num">TURNS</th><th class="num">WORK DONE</th><th class="num">TOKENS · % OF ALL</th><th class="num">EST. COST</th><th class="num">LAST ACTIVE</th></tr>${rows}</table>`;
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

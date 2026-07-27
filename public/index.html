@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AGENT TERMINAL</title>
+<style>
+  :root {
+    --bg: #0a0e14; --panel: #0f141c; --panel2: #131a24; --border: #1e2836;
+    --text: #c8d3e0; --dim: #5c6b80; --green: #7ee787; --user: #7ee787;
+    --claude: #ff9668; --codex: #58c4dc; --sys: #8b7ec8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #05070a; color: var(--text);
+    font-family: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
+    font-size: 13px; display: flex; align-items: stretch; justify-content: center;
+  }
+  .window {
+    display: flex; flex-direction: column; width: 100%; max-width: 1500px;
+    margin: 14px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg); overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  }
+  /* title bar */
+  .titlebar {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    background: var(--panel); border-bottom: 1px solid var(--border); user-select: none;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
+  .title { flex: 1; text-align: center; color: var(--dim); letter-spacing: 3px; font-size: 12px; }
+  .titlebar .btn { margin-left: 6px; }
+
+  /* project tabs */
+  .tabs { display: flex; align-items: flex-end; gap: 4px; padding: 8px 12px 0; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .tab {
+    padding: 7px 16px; border: 1px solid var(--border); border-bottom: none;
+    border-radius: 8px 8px 0 0; color: var(--dim); cursor: pointer; font-size: 12px;
+    background: var(--panel2); white-space: nowrap; user-select: none;
+  }
+  .tab.active { background: var(--bg); color: var(--text); border-color: #2c3c52; }
+  .tab:hover:not(.active) { color: var(--text); }
+  .tab.newtab { color: var(--green); font-weight: 700; }
+  .tab .popout { margin-left: 8px; color: var(--dim); }
+  .tab .popout:hover { color: var(--green); }
+  .btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 12px; font: inherit; cursor: pointer;
+  }
+  .btn:hover { border-color: #35506e; }
+  .btn.stop { color: #ff5f57; }
+  .btn.preview { color: var(--green); }
+
+  .main { flex: 1; display: flex; min-height: 0; }
+
+  /* sidebar */
+  .side {
+    width: 250px; min-width: 250px; border-right: 1px solid var(--border);
+    background: var(--panel); display: flex; flex-direction: column; overflow-y: auto;
+  }
+  .side h3 { font-size: 10px; letter-spacing: 2px; color: var(--dim); padding: 12px 14px 6px; }
+  .side-tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .side-tab { flex: 1; text-align: center; padding: 10px 0; font-size: 10px; letter-spacing: 1.5px; color: var(--dim); cursor: pointer; border-bottom: 2px solid transparent; user-select: none; }
+  .side-tab.active { color: var(--green); border-bottom-color: var(--green); }
+  .side-tab:hover:not(.active) { color: var(--text); }
+  .pane { flex: 1; overflow-y: auto; padding-top: 8px; }
+  .pane[hidden] { display: none; }
+
+  /* stats pane */
+  .stat-card { margin: 4px 10px 10px; padding: 10px 12px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; }
+  .stat-card .sname { font-weight: 700; font-size: 13px; }
+  .stat-card .smodel { color: var(--dim); font-size: 10px; margin-bottom: 6px; word-break: break-all; }
+  .stat-row { display: flex; justify-content: space-between; font-size: 11px; padding: 2px 0; color: var(--text); }
+  .stat-row .k { color: var(--dim); }
+  .room-stats { margin: 4px 10px 12px; padding: 8px 12px; border: 1px dashed var(--border); border-radius: 8px; font-size: 11px; color: var(--dim); }
+  .room-stats b { color: var(--text); }
+  .agent-card { margin: 4px 10px; padding: 10px 12px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; position: relative; }
+  .agent-kick { position: absolute; top: 6px; right: 8px; color: var(--dim); cursor: pointer; font-size: 11px; display: none; }
+  .agent-card:hover .agent-kick { display: block; }
+  .agent-kick:hover { color: #ff5f57; }
+  .connect-btn { margin: 6px 10px; padding: 7px; text-align: center; border: 1px dashed var(--border); border-radius: 8px; color: var(--green); cursor: pointer; font-size: 12px; }
+  .connect-btn:hover { border-color: var(--green); background: var(--panel2); }
+
+  /* connect-agent modal */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 10; }
+  .overlay[hidden] { display: none; }
+  .dialog { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: 340px; box-shadow: 0 20px 60px rgba(0,0,0,.7); }
+  .dialog h2 { font-size: 13px; letter-spacing: 2px; color: var(--green); margin-bottom: 14px; }
+  .dialog label { display: block; font-size: 10px; letter-spacing: 1px; color: var(--dim); margin: 10px 0 4px; }
+  .dialog input, .dialog select {
+    width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font: inherit; padding: 7px 10px; outline: none;
+  }
+  .dialog input:focus, .dialog select:focus { border-color: #35506e; }
+  .dialog .row2 { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+
+  /* usage bar */
+  .usagebar { display: flex; gap: 18px; align-items: center; padding: 6px 16px; border-top: 1px solid var(--border); background: var(--panel); font-size: 11px; color: var(--dim); white-space: nowrap; overflow-x: auto; }
+  .usagebar b { color: var(--text); font-weight: 600; }
+  .usagebar .ok { color: var(--green); }
+  .usagebar .warn { color: #febc2e; }
+  .agent-card .row { display: flex; align-items: center; gap: 8px; }
+  .agent-name { font-weight: 700; font-size: 14px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #28c840; box-shadow: 0 0 6px rgba(40,200,64,.5); margin-left: auto; }
+  .status-dot.thinking { background: #febc2e; box-shadow: 0 0 8px rgba(254,188,46,.8); animation: pulse 1s infinite; }
+  .status-dot.working { background: #28c840; box-shadow: 0 0 8px rgba(40,200,64,.9); animation: pulse .6s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .agent-model { color: var(--dim); font-size: 10.5px; margin-top: 3px; word-break: break-all; }
+  .agent-tokens { color: var(--dim); font-size: 10px; margin-top: 4px; }
+  .agent-limit { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: 10px; color: var(--dim); }
+  .limitbar { flex: 1; height: 5px; background: var(--panel); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .limitbar > div { height: 100%; transition: width .5s ease; }
+  .limit-sel { background: var(--panel); color: var(--dim); border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: 10px; padding: 1px 2px; outline: none; cursor: pointer; }
+  .limit-benched { color: #ff5f57; font-weight: 700; }
+  .agent-act { color: var(--dim); font-size: 11px; margin-top: 6px; min-height: 14px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-status-label { font-size: 10px; margin-top: 4px; }
+
+  .files { flex: 1; padding-bottom: 10px; }
+  .file { display: flex; padding: 3px 16px; color: var(--text); cursor: pointer; font-size: 12px; text-decoration: none; }
+  .file:hover { background: var(--panel2); }
+  .file .sz { margin-left: auto; color: var(--dim); font-size: 10px; }
+  .file .claim { margin-left: 8px; font-size: 10px; }
+
+  /* live NOW strip */
+  .nowstrip { border-bottom: 1px solid var(--border); background: #0d1420; padding: 6px 16px; font-size: 11.5px; }
+  .nowstrip[hidden] { display: none; }
+  .nowrow { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--dim); }
+  .nowrow b { font-weight: 700; }
+  .nowrow .doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .spinner { display: inline-block; width: 10px; text-align: center; color: var(--green); animation: spin 1s steps(4) infinite; }
+  @keyframes spin { 0% {content:''} }
+
+  /* pinned task board */
+  .board { border-bottom: 1px solid var(--border); background: var(--panel); max-height: 150px; overflow-y: auto; }
+  .board[hidden] { display: none; }
+  .board-head { display: flex; align-items: center; padding: 6px 14px; font-size: 10px; letter-spacing: 2px; color: var(--dim); cursor: pointer; user-select: none; }
+  .board-head .chev { margin-left: auto; }
+  .board-body { padding: 0 14px 8px; font-size: 11.5px; white-space: pre-wrap; color: var(--text); font-family: inherit; }
+  .board-body table { border-collapse: collapse; width: 100%; }
+  .board-body td, .board-body th { border: 1px solid var(--border); padding: 3px 8px; text-align: left; font-size: 11px; }
+  .board-body th { color: var(--dim); font-weight: 600; }
+  .nofiles { color: var(--dim); padding: 4px 16px; font-size: 11px; font-style: italic; }
+
+  /* chat */
+  .chat-wrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .chat { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .msg { margin-bottom: 14px; max-width: 100%; border-left: 3px solid transparent; padding-left: 10px; }
+  .talk-sel { background: var(--panel2); color: var(--dim); border: 1px solid var(--border); border-radius: 6px; font: inherit; font-size: 11px; padding: 4px 6px; outline: none; cursor: pointer; }
+  .msg .head { font-weight: 700; margin-bottom: 3px; }
+  .msg .head .time { color: var(--dim); font-weight: 400; font-size: 10px; margin-left: 8px; }
+  .msg .body { white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; color: var(--text); }
+  .msg.user .head { color: var(--user); }
+  .msg.system .body { color: var(--sys); font-style: italic; font-size: 12px; }
+  .msg .idle-tag { color: var(--dim); font-size: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; margin-left: 8px; }
+  .chat-img { display: block; max-width: min(420px, 90%); max-height: 260px; margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; }
+  .act-line { color: var(--dim); font-size: 11.5px; padding: 1px 0 1px 14px; }
+  .act-line b { font-weight: 600; }
+
+  /* live build panel */
+  .preview-pane { width: 44%; min-width: 320px; border-left: 1px solid var(--border); display: flex; flex-direction: column; background: var(--panel); }
+  .preview-pane[hidden] { display: none; }
+  .preview-head { display: flex; align-items: center; padding: 8px 12px; font-size: 10px; letter-spacing: 2px; color: var(--dim); border-bottom: 1px solid var(--border); }
+  .preview-head a { color: var(--green); margin-left: auto; text-decoration: none; letter-spacing: 0; font-size: 11px; }
+  .preview-head .reload { color: var(--dim); cursor: pointer; margin-left: 12px; letter-spacing: 0; font-size: 11px; }
+  #previewFrame { flex: 1; border: none; background: #fff; }
+
+  /* input */
+  .inputbar { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); }
+  .prompt-char { color: var(--green); font-weight: 700; font-size: 16px; }
+  #input {
+    flex: 1; background: transparent; border: none; outline: none; color: var(--text);
+    font: inherit; font-size: 14px; caret-color: var(--green);
+  }
+  #input::placeholder { color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar">
+    <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
+    <div class="title">AGENT TERMINAL — MULTI-AGENT ROOM</div>
+    <a class="btn" href="/usage" target="_blank" style="color:#79c0ff;text-decoration:none">📊 Usage</a>
+    <button class="btn preview" id="previewBtn">▶ Live Build</button>
+    <button class="btn" id="pauseBtn" style="color:#febc2e">⏸ Pause</button>
+    <button class="btn stop" id="stopBtn">■ Stop</button>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <div class="main">
+    <div class="side">
+      <div class="side-tabs">
+        <div class="side-tab active" data-pane="agents">AGENTS</div>
+        <div class="side-tab" data-pane="files">FILES</div>
+        <div class="side-tab" data-pane="stats">STATS</div>
+      </div>
+      <div class="pane" id="pane-agents">
+        <div id="agents"></div>
+        <div class="connect-btn" id="connectBtn">+ connect agent</div>
+      </div>
+      <div class="pane" id="pane-files" hidden>
+        <div class="files" id="files"><div class="nofiles">empty — give them a task</div></div>
+      </div>
+      <div class="pane" id="pane-stats" hidden>
+        <div id="stats"></div>
+      </div>
+    </div>
+    <div class="chat-wrap">
+      <div class="nowstrip" id="nowstrip" hidden></div>
+      <div class="board" id="board" hidden>
+        <div class="board-head" id="boardHead">TASK BOARD<span class="chev" id="boardChev">▾</span></div>
+        <div class="board-body" id="boardBody"></div>
+      </div>
+      <div class="chat" id="chat"></div>
+      <div class="inputbar">
+        <span class="prompt-char">❯</span>
+        <input id="input" placeholder="Tell your agents what to build… (they'll coordinate with each other)" autofocus>
+        <select class="talk-sel" id="talkSel" title="how agents take turns">
+          <option value="turns">🗣 one at a time</option>
+          <option value="parallel">🗫 all at once</option>
+        </select>
+      </div>
+      <div class="usagebar" id="usagebar">💰 usage: waiting for first turn…</div>
+    </div>
+    <div class="preview-pane" id="previewPane" hidden>
+      <div class="preview-head">LIVE BUILD<span class="reload" id="reloadBtn">↻ reload</span><a href="/preview/" target="_blank" id="previewTab">open in tab ↗</a></div>
+      <iframe id="previewFrame" src="/preview/"></iframe>
+    </div>
+  </div>
+</div>
+<div class="overlay" id="projOverlay" hidden>
+  <div class="dialog">
+    <h2 id="projDlgTitle">PROJECT</h2>
+    <div style="color:var(--dim);font-size:11.5px;line-height:1.6;margin-bottom:6px">
+      <b style="color:var(--text)">Close</b> hides the tab but keeps every file — reopen anytime by making a project with the same name.<br>
+      <b style="color:#ff5f57">Delete</b> moves the whole project to the .trash folder.
+    </div>
+    <div class="row2">
+      <button class="btn" id="projCancel">cancel</button>
+      <button class="btn" id="projClose" style="color:#febc2e">▣ close</button>
+      <button class="btn stop" id="projDelete">🗑 delete</button>
+    </div>
+  </div>
+</div>
+<div class="overlay" id="overlay" hidden>
+  <div class="dialog">
+    <h2>CONNECT AGENT</h2>
+    <label>NAME</label>
+    <input id="agName" placeholder="e.g. Scout" maxlength="20">
+    <label>ENGINE</label>
+    <select id="agType">
+      <option value="claude">Claude (Claude Code CLI)</option>
+      <option value="codex">Codex (GPT-5, ChatGPT app)</option>
+    </select>
+    <div id="modelRow">
+      <label>CLAUDE MODEL</label>
+      <select id="agModel">
+        <option value="">Default (Fable 5)</option>
+        <option value="claude-opus-4-8">Opus 4.8</option>
+        <option value="claude-sonnet-5">Sonnet 5</option>
+        <option value="claude-haiku-4-5-20251001">Haiku 4.5 (fast)</option>
+      </select>
+    </div>
+    <div class="row2">
+      <button class="btn" id="agCancel">cancel</button>
+      <button class="btn preview" id="agConnect">connect</button>
+    </div>
+  </div>
+</div>
+<script>
+const chat = document.getElementById('chat');
+const agentsEl = document.getElementById('agents');
+const filesEl = document.getElementById('files');
+const input = document.getElementById('input');
+const agentInfo = {}; // id -> {name, color, model, status}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
+function atBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 60; }
+function scrollDown(force) { if (force || atBottom()) chat.scrollTop = chat.scrollHeight; }
+
+function addMsg(m) {
+  const stick = atBottom();
+  const div = document.createElement('div');
+  div.className = 'msg ' + m.from;
+  let text = m.text;
+  const idle = /\[IDLE\]\s*$/i.test(text.trim());
+  if (idle) text = text.replace(/\[IDLE\]\s*$/i, '').trim();
+  const imgHtml = m.img ? `<a href="/file/${encodeURIComponent(currentProject)}/${encodeURIComponent(m.img)}" target="_blank"><img class="chat-img" src="/file/${encodeURIComponent(currentProject)}/${encodeURIComponent(m.img)}?v=${m.ts}" loading="lazy"></a>` : '';
+  if (m.from !== 'system') div.style.borderLeftColor = m.from === 'user' ? 'var(--user)' : (agentInfo[m.from]?.color || 'var(--border)');
+  if (m.from === 'system') {
+    div.innerHTML = `<div class="body">${esc(m.text)}</div>${imgHtml}`;
+  } else {
+    const name = m.from === 'user' ? 'you' : esc(m.name);
+    const color = m.from === 'user' ? 'var(--user)' : (agentInfo[m.from]?.color || 'var(--text)');
+    div.innerHTML = `<div class="head" style="color:${color}">${name}<span class="time">${fmtTime(m.ts)}</span>${idle ? '<span class="idle-tag">idle — waiting</span>' : ''}</div><div class="body">${esc(text)}</div>`;
+  }
+  chat.appendChild(div);
+  scrollDown(stick || m.from === 'user');
+}
+
+const lastAct = {};
+function addActivity(a) {
+  const stick = atBottom();
+  const div = document.createElement('div');
+  div.className = 'act-line';
+  const color = agentInfo[a.agent]?.color || 'var(--dim)';
+  div.innerHTML = `<b style="color:${color}">${esc(a.name)}</b> ${esc(a.text)}`;
+  chat.appendChild(div);
+  scrollDown(stick);
+  const card = document.getElementById('act-' + a.agent);
+  if (card) card.textContent = a.text;
+  lastAct[a.agent] = a.text;
+  renderNow();
+}
+
+function renderNow() {
+  const strip = document.getElementById('nowstrip');
+  const busy = Object.values(agentInfo).filter(a => a.status && a.status !== 'idle');
+  if (!busy.length) { strip.hidden = true; return; }
+  strip.hidden = false;
+  strip.innerHTML = busy.map(a =>
+    `<div class="nowrow"><span class="spinner">◐</span><b style="color:${a.color}">${esc(a.name)}</b>` +
+    `<span class="doing">${a.status === 'thinking' ? 'thinking…' : esc(lastAct[a.id] || 'working…')}</span></div>`
+  ).join('');
+}
+
+function kfmt(n) { return n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n); }
+function tokenLine(t) {
+  if (!t || (!t.in && !t.out)) return '<div class="agent-tokens">⚡ no usage yet</div>';
+  const cost = t.cost ? ` · ~$${t.cost.toFixed(2)}` : '';
+  return `<div class="agent-tokens">⚡ ${kfmt(t.in + t.out)} tokens${cost}</div>`;
+}
+
+const LIMIT_OPTS = [
+  ['', '∞ no limit'], [500000, '500k'], [1000000, '1M'], [2000000, '2M'],
+  [5000000, '5M'], [10000000, '10M'], [50000000, '50M'], [100000000, '100M'], ['custom', 'custom…'],
+];
+function limitLine(a) {
+  const lim = a.limit, used = a.usedGlobal || 0;
+  const pct = lim ? Math.min(100, used / lim * 100) : 0;
+  const benched = lim && used >= lim;
+  const opts = LIMIT_OPTS.map(([v, l]) =>
+    `<option value="${v}" ${String(v) === String(lim || '') ? 'selected' : ''}>${l}</option>`).join('');
+  return `<div class="agent-limit">
+    <span>${benched ? '<span class="limit-benched">⛔</span>' : '⛽'}</span>
+    ${lim ? `<div class="limitbar"><div style="width:${pct}%;background:${pct >= 100 ? '#ff5f57' : pct > 90 ? '#ff5f57' : pct > 50 ? '#febc2e' : '#28c840'}"></div></div><span>${Math.round(pct)}%</span>` : '<div class="limitbar"><div style="width:0"></div></div>'}
+    <select class="limit-sel" data-lim="${a.id}">${opts}</select>
+  </div>`;
+}
+
+function renderAgents() {
+  agentsEl.innerHTML = '';
+  for (const id in agentInfo) {
+    const a = agentInfo[id];
+    const label = a.status === 'idle'
+      ? '<div class="agent-status-label" style="color:#28c840;opacity:.6">● ready</div>'
+      : `<div class="agent-status-label" style="color:${a.status==='working' ? '#28c840' : '#febc2e'}">${a.status === 'working' ? '⚙ working' : '… thinking'}</div>`;
+    agentsEl.insertAdjacentHTML('beforeend', `
+      <div class="agent-card">
+        <span class="agent-kick" data-kick="${id}" title="disconnect">✕</span>
+        <div class="row">
+          <span class="agent-name" style="color:${a.color}">${esc(a.name)}</span>
+          <span class="status-dot ${a.status}"></span>
+        </div>
+        <div class="agent-model">${esc(a.model || '')}</div>
+        ${tokenLine(a.tokens)}
+        ${limitLine(a)}
+        ${label}
+        <div class="agent-act" id="act-${id}"></div>
+      </div>`);
+  }
+  agentsEl.querySelectorAll('[data-lim]').forEach(sel => {
+    sel.onchange = () => {
+      let v = sel.value === 'custom' ? Math.round(parseFloat(prompt('Limit in millions of tokens (e.g. 2.5):') || '0') * 1e6) : Number(sel.value);
+      fetch('/agents/limit', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id: sel.dataset.lim, tokens: v || null }) });
+    };
+  });
+  agentsEl.querySelectorAll('[data-kick]').forEach(el => {
+    el.onclick = () => {
+      const a = agentInfo[el.dataset.kick];
+      if (a && confirm(`Disconnect ${a.name} from all projects?`))
+        fetch('/agents/remove', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id: el.dataset.kick }) });
+    };
+  });
+}
+
+function ago(ts) {
+  if (!ts) return 'never';
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  return Math.floor(s/3600) + 'h ago';
+}
+
+function renderStats() {
+  const el = document.getElementById('stats');
+  let totalMsgs = 0, totalCost = 0, totalTok = 0;
+  let html = '';
+  for (const id in agentInfo) {
+    const a = agentInfo[id];
+    const s = a.stats || {};
+    const t = a.tokens || { in: 0, out: 0, cost: 0 };
+    totalCost += t.cost || 0; totalTok += (t.in || 0) + (t.out || 0);
+    const avg = s.turns ? Math.round((s.ms || 0) / s.turns / 1000) : 0;
+    html += `
+      <div class="stat-card">
+        <div class="sname" style="color:${a.color}">${esc(a.name)}</div>
+        <div class="smodel">${esc(a.model || '')}</div>
+        <div class="stat-row"><span class="k">turns taken</span><span>${s.turns || 0}</span></div>
+        <div class="stat-row"><span class="k">avg turn time</span><span>${avg}s</span></div>
+        <div class="stat-row"><span class="k">files edited</span><span>${s.files || 0}</span></div>
+        <div class="stat-row"><span class="k">commands run</span><span>${s.cmds || 0}</span></div>
+        <div class="stat-row"><span class="k">web searches</span><span>${s.searches || 0}</span></div>
+        <div class="stat-row"><span class="k">tokens</span><span>${kfmt((t.in||0)+(t.out||0))}</span></div>
+        ${t.cost ? `<div class="stat-row"><span class="k">est. cost</span><span>~$${t.cost.toFixed(2)}</span></div>` : ''}
+        <div class="stat-row"><span class="k">last active</span><span>${ago(s.lastActive)}</span></div>
+      </div>`;
+  }
+  el.innerHTML = `<div class="room-stats">room total: <b>${kfmt(totalTok)}</b> tokens${totalCost ? ` · <b>~$${totalCost.toFixed(2)}</b> (claude side)` : ''}</div>` + html;
+}
+
+document.querySelectorAll('.side-tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.side-tab').forEach(t => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('.pane').forEach(p => p.hidden = p.id !== 'pane-' + tab.dataset.pane);
+    if (tab.dataset.pane === 'stats') renderStats();
+  };
+});
+
+let lastFiles = [], claims = {};
+function renderFiles(files) {
+  if (files) lastFiles = files;
+  files = lastFiles;
+  if (!files.length) { filesEl.innerHTML = '<div class="nofiles">empty — give them a task</div>'; return; }
+  filesEl.innerHTML = files.map(f => {
+    const base = f.path.split('/').pop();
+    const c = claims[base];
+    const badge = c ? `<span class="claim" style="color:${c.color}">✏ ${esc(c.name)}</span>` : '';
+    return `<a class="file" href="/file/${encodeURIComponent(currentProject)}/${encodeURIComponent(f.path)}" target="_blank">${esc(f.path)}${badge}<span class="sz">${f.size > 1024 ? (f.size/1024).toFixed(1)+'k' : f.size+'b'}</span></a>`;
+  }).join('');
+}
+
+// ---- pinned task board (renders TASKBOARD.md)
+let boardSize = -1, boardCollapsed = false;
+function mdTableToHtml(md) {
+  const rows = md.split('\n').filter(l => l.trim().startsWith('|'));
+  const cells = rows.map(r => r.split('|').slice(1, -1).map(c => c.trim())).filter(r => r.length && !r[0].match(/^-+$/));
+  const data = cells.filter(r => !r.every(c => /^-*$/.test(c)));
+  if (data.length < 2) return null; // header only = empty board
+  return '<table><tr>' + data[0].map(c => `<th>${esc(c)}</th>`).join('') + '</tr>' +
+    data.slice(1).map(r => '<tr>' + r.map(c => `<td>${esc(c)}</td>`).join('') + '</tr>').join('') + '</table>';
+}
+async function refreshBoard(files) {
+  const f = (files || lastFiles).find(x => x.path === 'TASKBOARD.md');
+  const boardEl = document.getElementById('board');
+  if (!f) { boardEl.hidden = true; boardSize = -1; return; }
+  if (f.size === boardSize) return;
+  boardSize = f.size;
+  try {
+    const md = await (await fetch(`/file/${encodeURIComponent(currentProject)}/TASKBOARD.md?t=` + Date.now())).text();
+    const html = mdTableToHtml(md);
+    if (!html) { boardEl.hidden = true; return; }
+    document.getElementById('boardBody').innerHTML = html;
+    boardEl.hidden = false;
+    document.getElementById('boardBody').style.display = boardCollapsed ? 'none' : '';
+  } catch { boardEl.hidden = true; }
+}
+document.getElementById('boardHead').onclick = () => {
+  boardCollapsed = !boardCollapsed;
+  document.getElementById('boardBody').style.display = boardCollapsed ? 'none' : '';
+  document.getElementById('boardChev').textContent = boardCollapsed ? '▸' : '▾';
+};
+
+// ---- projects & tabs
+let currentProject = new URLSearchParams(location.search).get('project') || '';
+let projects = [];
+let es = null;
+
+function renderTabs() {
+  const tabsEl = document.getElementById('tabs');
+  tabsEl.innerHTML = '';
+  for (const id of projects) {
+    const t = document.createElement('div');
+    t.className = 'tab' + (id === currentProject ? ' active' : '');
+    t.textContent = id;
+    if (id === currentProject) {
+      const pop = document.createElement('span');
+      pop.className = 'popout'; pop.textContent = '⧉'; pop.title = 'open in new window';
+      pop.onclick = e => { e.stopPropagation(); window.open('/?project=' + encodeURIComponent(id), '_blank', 'width=1500,height=900'); };
+      t.appendChild(pop);
+      const x = document.createElement('span');
+      x.className = 'popout'; x.textContent = '✕'; x.title = 'close or delete project';
+      x.onclick = e => { e.stopPropagation(); document.getElementById('projOverlay').hidden = false; };
+      t.appendChild(x);
+    }
+    t.onclick = () => { if (id !== currentProject) connect(id); };
+    tabsEl.appendChild(t);
+  }
+  const plus = document.createElement('div');
+  plus.className = 'tab newtab';
+  plus.textContent = '+ new project';
+  plus.onclick = async () => {
+    const name = prompt('Project name:');
+    if (!name) return;
+    const r = await fetch('/projects', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+    const j = await r.json();
+    if (j.id) connect(j.id);
+  };
+  tabsEl.appendChild(plus);
+}
+
+function connect(project) {
+  if (es) es.close();
+  currentProject = project || '';
+  history.replaceState(null, '', currentProject ? '/?project=' + encodeURIComponent(currentProject) : '/');
+  chat.innerHTML = '<div class="msg system"><div class="body">connecting…</div></div>';
+  es = new EventSource('/events' + (currentProject ? '?project=' + encodeURIComponent(currentProject) : ''));
+  es.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'hello') {
+      currentProject = ev.project;
+      projects = ev.projects || [];
+      history.replaceState(null, '', '/?project=' + encodeURIComponent(currentProject));
+      renderTabs();
+      chat.innerHTML = '';
+      for (const k in agentInfo) delete agentInfo[k];
+      for (const a of ev.agents) agentInfo[a.id] = a;
+      renderAgents();
+      for (const m of ev.messages) addMsg(m);
+      claims = ev.claims || {};
+      renderFiles(ev.files || []);
+      boardSize = -1; refreshBoard(ev.files || []);
+      setPaused(ev.paused);
+      if (ev.usage) renderUsage(ev.usage);
+      document.getElementById('talkSel').value = ev.talkMode || 'turns';
+      schedulePreviewReload(ev.files || [], true);
+      scrollDown(true);
+      if (!ev.messages.length) addMsg({ from: 'system', text: '● room open — your agents are standing by. Type a task below.', ts: Date.now() });
+    }
+    else if (ev.type === 'msg') addMsg(ev);
+    else if (ev.type === 'activity') addActivity(ev);
+    else if (ev.type === 'status') {
+      const a = agentInfo[ev.agent];
+      if (a) { a.status = ev.status; if (ev.model) a.model = ev.model; renderAgents(); renderNow(); }
+    }
+    else if (ev.type === 'files') { renderFiles(ev.files); refreshBoard(ev.files); schedulePreviewReload(ev.files); }
+    else if (ev.type === 'claims') { claims = ev.claims || {}; renderFiles(); }
+    else if (ev.type === 'paused') setPaused(ev.paused);
+    else if (ev.type === 'usage') renderUsage(ev);
+    else if (ev.type === 'projects') {
+      projects = ev.projects || [];
+      if (!projects.includes(currentProject)) { connect(projects[0] || ''); return; }
+      renderTabs();
+    }
+    else if (ev.type === 'talkmode') document.getElementById('talkSel').value = ev.mode;
+    else if (ev.type === 'agents') {
+      for (const k in agentInfo) delete agentInfo[k];
+      for (const a of ev.agents) agentInfo[a.id] = a;
+      renderAgents();
+      if (!document.getElementById('pane-stats').hidden) renderStats();
+    }
+  };
+}
+connect(currentProject);
+
+// ---- live build panel
+const pane = document.getElementById('previewPane');
+const frame = document.getElementById('previewFrame');
+let userClosedPane = false, reloadTimer = null;
+function previewURL() { return '/preview/' + encodeURIComponent(currentProject) + '/?t=' + Date.now(); }
+function schedulePreviewReload(files, switching) {
+  const hasIndex = files.some(f => f.path === 'index.html' || f.path.endsWith('/index.html'));
+  if (switching && !hasIndex) { pane.hidden = true; return; } // new project with no build yet
+  if (hasIndex && pane.hidden && !userClosedPane) pane.hidden = false; // auto-open when a build appears
+  if (pane.hidden) return;
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    frame.src = previewURL();
+    document.getElementById('previewTab').href = '/preview/' + encodeURIComponent(currentProject) + '/';
+  }, switching ? 50 : 1200);
+}
+document.getElementById('previewBtn').onclick = () => {
+  pane.hidden = !pane.hidden;
+  userClosedPane = pane.hidden;
+  if (!pane.hidden) frame.src = previewURL();
+};
+document.getElementById('reloadBtn').onclick = () => { frame.src = previewURL(); };
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && input.value.trim()) {
+    fetch('/send', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ text: input.value, project: currentProject }) });
+    input.value = '';
+  }
+});
+document.getElementById('stopBtn').onclick = () => fetch('/stop', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ project: currentProject }) });
+
+function renderUsage(u) {
+  const bar = document.getElementById('usagebar');
+  const r = u.room || { tok: 0, cost: 0 }, g = u.global || { tok: 0, cost: 0 };
+  let plan = '';
+  if (u.rateLimit) {
+    const ok = u.rateLimit.status === 'allowed';
+    const resets = u.rateLimit.resetsAt ? new Date(u.rateLimit.resetsAt * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '?';
+    plan = `<span>claude plan: <span class="${ok ? 'ok' : 'warn'}">${ok ? '● OK' : '▲ ' + esc(u.rateLimit.status)}</span> · ${esc(u.rateLimit.rateLimitType || '').replace('_',' ')} window resets <b>${resets}</b></span>`;
+  }
+  bar.innerHTML =
+    `<span>💰 this room: <b>${kfmt(r.tok)}</b> tok · <b>~$${r.cost.toFixed(2)}</b></span>` +
+    `<span>all projects: <b>${kfmt(g.tok)}</b> tok · <b>~$${g.cost.toFixed(2)}</b></span>` + plan +
+    `<span style="margin-left:auto">$ = claude side only · codex bills to your ChatGPT plan</span>`;
+}
+
+let isPaused = false;
+function setPaused(p) {
+  isPaused = !!p;
+  const b = document.getElementById('pauseBtn');
+  b.textContent = isPaused ? '▶ Resume' : '⏸ Pause';
+  b.style.color = isPaused ? '#28c840' : '#febc2e';
+}
+document.getElementById('pauseBtn').onclick = () =>
+  fetch(isPaused ? '/resume' : '/pause', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ project: currentProject }) });
+
+// ---- close/delete project dialog
+const projOverlay = document.getElementById('projOverlay');
+document.getElementById('projCancel').onclick = () => { projOverlay.hidden = true; };
+projOverlay.onclick = e => { if (e.target === projOverlay) projOverlay.hidden = true; };
+document.getElementById('projClose').onclick = () => {
+  projOverlay.hidden = true;
+  fetch('/projects/close', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id: currentProject }) });
+};
+document.getElementById('projDelete').onclick = () => {
+  if (!confirm(`Delete "${currentProject}"? It moves to .trash (recoverable by hand).`)) return;
+  projOverlay.hidden = true;
+  fetch('/projects/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id: currentProject }) });
+};
+
+// ---- talk mode
+document.getElementById('talkSel').onchange = e =>
+  fetch('/talkmode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ project: currentProject, mode: e.target.value }) });
+
+// ---- connect agent dialog
+const overlay = document.getElementById('overlay');
+document.getElementById('connectBtn').onclick = () => { overlay.hidden = false; document.getElementById('agName').focus(); };
+document.getElementById('agCancel').onclick = () => { overlay.hidden = true; };
+overlay.onclick = e => { if (e.target === overlay) overlay.hidden = true; };
+document.getElementById('agType').onchange = e => {
+  document.getElementById('modelRow').style.display = e.target.value === 'claude' ? '' : 'none';
+};
+document.getElementById('agConnect').onclick = async () => {
+  const name = document.getElementById('agName').value.trim();
+  const type = document.getElementById('agType').value;
+  const modelFlag = document.getElementById('agModel').value;
+  if (!name) return alert('Give the agent a name');
+  const r = await fetch('/agents/add', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name, type, modelFlag: type === 'claude' ? modelFlag : undefined }) });
+  if (r.status === 409) return alert('That name is taken');
+  if (!r.ok) return alert('Could not connect agent');
+  overlay.hidden = true;
+  document.getElementById('agName').value = '';
+};
+</script>
+</body>
+</html>

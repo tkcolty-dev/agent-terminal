@@ -20,5 +20,5 @@
 | Verify harness changes vs feedback shortlist | Codex | done (2/6 PASS, 2 partial, 2 fail) | ../../../server.js |
 | Round-2 feedback (lead seat, plain-language) | Boss | done | FEEDBACK2-boss.md |
 | Round-2 feedback (Codex seat, plain-language) | Codex | done (7/7 structured; overlap review PASS) | FEEDBACK2-codex.md |
-| Round-2 feedback (browser seat, plain-language) | Claudious | assigned | FEEDBACK2-claudious.md |
-| Round-2 merged summary | Boss | waiting on workers | FEEDBACK2-SUMMARY.md |
+| Round-2 feedback (browser seat, plain-language) | Claudious | done | FEEDBACK2-claudious.md |
+| Round-2 merged summary | Boss | done | FEEDBACK2-SUMMARY.md |

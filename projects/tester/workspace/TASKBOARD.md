@@ -10,5 +10,6 @@
 | Round-2 research: TTL + routing | Claudious | done | round2-claudious.md |
 | Round-2 external model panel | Boss | done | round2-panel.md |
 | Round-2 merged plan | Boss | done | PLAN-round2.md |
+| Round-2 benchmark baseline | Codex | done | .notes/bench-r2-before.json |
 | Implement round 2 | — | awaiting user OK | ../../../server.js |
 | Breakout game (paused by user) | Codex/— | on hold | game.js |

@@ -5,7 +5,7 @@
   "color": "#58c4dc",
   "type": "codex",
   "model": "gpt-5 · codex-cli 0.145",
-  "limit": 2000000
+  "limit": 5000000
  },
  {
   "id": "boss",
@@ -23,24 +23,6 @@
   "type": "claude",
   "model": "claude-opus-4-8",
   "modelFlag": "claude-opus-4-8",
-  "limit": 1000000
- },
- {
-  "id": "sonnet",
-  "name": "Sonnet",
-  "color": "#7ee787",
-  "type": "claude",
-  "model": "claude-sonnet-5",
-  "modelFlag": "claude-sonnet-5",
-  "limit": 1000000
- },
- {
-  "id": "haiku",
-  "name": "Haiku",
-  "color": "#f778ba",
-  "type": "claude",
-  "model": "claude-haiku-4-5-20251001",
-  "modelFlag": "claude-haiku-4-5-20251001",
   "limit": 1000000
  }
 ]

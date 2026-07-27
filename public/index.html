@@ -104,12 +104,13 @@
   .drop-overlay[hidden] { display: none; }
 
   /* usage bar */
-  .usagebar { display: flex; gap: 18px; align-items: center; padding: 6px 16px; border-top: 1px solid var(--border); background: var(--panel); font-size: 11px; color: var(--dim); white-space: nowrap; overflow-x: auto; }
+  .usagebar { display: flex; gap: 8px 18px; align-items: center; flex-wrap: wrap; padding: 6px 16px; border-top: 1px solid var(--border); background: var(--panel); font-size: 11px; color: var(--dim); }
+  .usagebar > span { white-space: nowrap; }
   .usagebar b { color: var(--text); font-weight: 600; }
   .usagebar .ok { color: var(--green); }
   .usagebar .warn { color: #febc2e; }
   .agent-card .row { display: flex; align-items: center; gap: 8px; }
-  .agent-name { font-weight: 700; font-size: 14px; }
+  .agent-name { font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #28c840; box-shadow: 0 0 6px rgba(40,200,64,.5); margin-left: auto; }
   .status-dot.thinking { background: #febc2e; box-shadow: 0 0 8px rgba(254,188,46,.8); animation: pulse 1s infinite; }
   .status-dot.working { background: #28c840; box-shadow: 0 0 8px rgba(40,200,64,.9); animation: pulse .6s infinite; }
@@ -404,9 +405,9 @@ function showDone(text) {
 
 function kfmt(n) { return n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n); }
 function tokenLine(t) {
-  if (!t || (!t.in && !t.out)) return '<div class="agent-tokens">⚡ no usage yet</div>';
+  if (!t || (!t.in && !t.out)) return '<div class="agent-tokens" title="usage in THIS project">⚡ no usage yet</div>';
   const cost = t.cost ? ` · ~$${t.cost.toFixed(2)}` : '';
-  return `<div class="agent-tokens">⚡ ${kfmt(t.in + t.out)} tokens${cost}</div>`;
+  return `<div class="agent-tokens" title="usage in THIS project">⚡ ${kfmt(t.in + t.out)} tokens${cost}</div>`;
 }
 
 const LIMIT_OPTS = [
@@ -419,7 +420,7 @@ function limitLine(a) {
   const benched = lim && used >= lim;
   const opts = LIMIT_OPTS.map(([v, l]) =>
     `<option value="${v}" ${String(v) === String(lim || '') ? 'selected' : ''}>${l}</option>`).join('');
-  return `<div class="agent-limit">
+  return `<div class="agent-limit" title="fuel gauge: usage across ALL projects vs this agent's limit">
     <span>${benched ? '<span class="limit-benched">⛔</span>' : '⛽'}</span>
     ${lim ? `<div class="limitbar"><div style="width:${pct}%;background:${pct >= 100 ? '#ff5f57' : pct > 90 ? '#ff5f57' : pct > 50 ? '#febc2e' : '#28c840'}"></div></div><span>${Math.round(pct)}%</span>` : '<div class="limitbar"><div style="width:0"></div></div>'}
     <select class="limit-sel" data-lim="${a.id}">${opts}</select>
@@ -688,10 +689,10 @@ function renderUsage(u) {
     const resets = u.rateLimit.resetsAt ? new Date(u.rateLimit.resetsAt * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '?';
     plan = `<span>claude plan: <span class="${ok ? 'ok' : 'warn'}">${ok ? '● OK' : '▲ ' + esc(u.rateLimit.status)}</span> · ${esc(u.rateLimit.rateLimitType || '').replace('_',' ')} window resets <b>${resets}</b></span>`;
   }
+  bar.title = '$ estimates cover the Claude side only — Codex bills to your ChatGPT plan';
   bar.innerHTML =
     `<span>💰 this room: <b>${kfmt(r.tok)}</b> tok · <b>~$${r.cost.toFixed(2)}</b></span>` +
-    `<span>all projects: <b>${kfmt(g.tok)}</b> tok · <b>~$${g.cost.toFixed(2)}</b></span>` + plan +
-    `<span style="margin-left:auto">$ = claude side only · codex bills to your ChatGPT plan</span>`;
+    `<span>all projects: <b>${kfmt(g.tok)}</b> tok · <b>~$${g.cost.toFixed(2)}</b></span>` + plan;
 }
 
 let isPaused = false;

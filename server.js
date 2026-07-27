@@ -351,7 +351,8 @@ class ClaudeAgent extends AgentRunner {
   handleEvent(ev, texts) {
     if (ev.type === 'system' && ev.subtype === 'init') {
       this.sessionId = ev.session_id;
-      if (ev.model) this.model = ev.model;
+      // don't let a [trivial] Haiku-routed turn overwrite the agent's real model label
+      if (ev.model && !this.turnModelOverride) this.model = ev.model;
       this.setStatus('thinking');
     } else if (ev.type === 'rate_limit_event' && ev.rate_limit_info) {
       lastRateLimit = ev.rate_limit_info;

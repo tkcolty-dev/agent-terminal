@@ -5,7 +5,7 @@
   "color": "#58c4dc",
   "type": "codex",
   "model": "gpt-5 · codex-cli 0.145",
-  "limit": 1000000
+  "limit": 2000000
  },
  {
   "id": "boss",
@@ -14,7 +14,7 @@
   "type": "claude",
   "model": "claude",
   "role": "lead",
-  "limit": 20000000
+  "limit": 5000000
  },
  {
   "id": "claudious-opus-48",

@@ -15,7 +15,11 @@ const PORT = 4600;
 const ROOT = __dirname;
 const PROJECTS_DIR = path.join(ROOT, 'projects');
 const CODEX_BIN = '/Applications/ChatGPT.app/Contents/Resources/codex';
-const MAX_AUTO_TURNS = 8;      // agent-to-agent turns allowed per user message (keep chatter cheap)
+const MAX_AUTO_TURNS = 3;      // agent-to-agent turns allowed per user message (keep chatter cheap)
+const ROTATE_WORKER_TURNS = 6; // fresh CLI session after this many turns (bounds context growth)
+const ROTATE_LEAD_TURNS = 10;
+const INBOX_MAX_MSGS = 6;      // per-wake inbox: last N relevant messages…
+const INBOX_MAX_CHARS = 6000;  // …capped at this many chars
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
 const BRIEF_V = 9;             // bump to re-send the room briefing to existing agents
 
@@ -133,11 +137,24 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
   }
 
   buildPrompt() {
-    const fresh = this.room.messages.slice(this.seenUpTo);
+    const all = this.room.messages.slice(this.seenUpTo);
     this.seenUpTo = this.room.messages.length;
+    // inbox filter (token diet): drop system chatter, [IDLE] sign-offs, and
+    // messages @aimed at other agents; keep only the last few, char-capped
+    const relevant = all.filter(m => {
+      if (m.from === this.id || m.from === 'system') return false;
+      const targets = this.room.mentionTargets(m.text);
+      if (targets.size && !targets.has(this.id)) return false;
+      if (saidIdle(m.text) && !targets.has(this.id) && m.from !== 'user') return false;
+      return true;
+    });
+    let kept = relevant.slice(-INBOX_MAX_MSGS), chars = 0;
+    for (let i = kept.length - 1; i >= 0; i--) {
+      chars += kept[i].text.length;
+      if (chars > INBOX_MAX_CHARS && i < kept.length - 1) { kept = kept.slice(i + 1); break; }
+    }
     const stamp = ts => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const transcript = fresh
-      .filter(m => m.from !== this.id)
+    const transcript = kept
       .map(m => `[${stamp(m.ts)}] ${m.from === 'user' ? 'USER' : m.name.toUpperCase()}: ${m.text}`)
       .join('\n\n');
     let prompt = '';
@@ -155,6 +172,14 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
     return prompt;
   }
 
+  // Session rotation: --resume sessions grow forever and re-bill at full price
+  // after the prompt-cache TTL. A fresh session with MEMORY.md carry-over keeps
+  // cost linear instead of quadratic.
+  shouldRotateSession() {
+    const cap = this.role === 'lead' ? ROTATE_LEAD_TURNS : ROTATE_WORKER_TURNS;
+    return this.sessionId && (this.sessionTurns || 0) >= cap;
+  }
+
   async runTurn() {
     this.busy = true;
     this.setStatus('thinking');
@@ -162,6 +187,13 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
     this.stats.turns++;
     this.stats.lastActive = t0;
     this.currentEdits = new Set();
+    if (this.shouldRotateSession()) {
+      this.sessionId = null;
+      this.briefedV = 0; // fresh session needs the (cached) briefing again
+      this.sessionTurns = 0;
+      this.activity('♻ fresh session (cost control) — carrying over via MEMORY.md');
+    }
+    this.sessionTurns = (this.sessionTurns || 0) + 1;
     const prompt = this.buildPrompt();
     try {
       const reply = await this.spawnTurn(prompt);
@@ -234,7 +266,7 @@ let lastRateLimit = null; // latest Claude plan window info seen from any agent
 class ClaudeAgent extends AgentRunner {
   command() {
     const args = ['-p', '--output-format', 'stream-json', '--verbose',
-      '--dangerously-skip-permissions', '--max-turns', '40'];
+      '--dangerously-skip-permissions', '--max-turns', '12'];
     if (this.modelFlag) args.push('--model', this.modelFlag);
     if (this.sessionId) args.push('--resume', this.sessionId);
     return { cmd: 'claude', args };
@@ -426,6 +458,7 @@ class Room {
           if (sa.tokens) a.tokens = sa.tokens;
           if (sa.stats) a.stats = { ...a.stats, ...sa.stats };
           if (sa.model) a.model = sa.model;
+          a.sessionTurns = sa.sessionTurns || 0;
         }
       }
     } catch {}
@@ -437,7 +470,7 @@ class Room {
       const state = {
         talkMode: this.talkMode,
         messages: this.messages,
-        agents: this.agents.map(a => ({ id: a.id, sessionId: a.sessionId, briefedV: a.briefedV || 0, seenUpTo: a.seenUpTo, tokens: a.tokens, stats: a.stats, model: a.model })),
+        agents: this.agents.map(a => ({ id: a.id, sessionId: a.sessionId, briefedV: a.briefedV || 0, seenUpTo: a.seenUpTo, tokens: a.tokens, stats: a.stats, model: a.model, sessionTurns: a.sessionTurns || 0 })),
       };
       fs.writeFile(this.stateFile, JSON.stringify(state), () => {});
     }, 300);
@@ -525,6 +558,8 @@ class Room {
     if (oneAtATime && this.agents.some(a => a.busy)) return; // someone's speaking — wait your turn
     for (const agent of this.agents) {
       if (agent.busy) continue;
+      // batch worker reports: the lead reviews everything in ONE wake once workers are done
+      if (agent.role === 'lead' && this.agents.some(a => a !== agent && a.busy)) continue;
       const unseen = this.messages.slice(agent.seenUpTo);
       if (!unseen.length) continue;
       const wakers = unseen.filter(m => this.wakes(m, agent));

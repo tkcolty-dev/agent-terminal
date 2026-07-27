@@ -41,9 +41,37 @@ All optional — the defaults are the safe local setup.
 
 | env var | default | what it does |
 |---------|---------|--------------|
+| `AGENT_TERMINAL_HOME` | `~/.agent-terminal` | Where **your** rooms, roster and settings live. |
+| `AGENT_TERMINAL_SKILLS` | *(unset)* | Directory of `SKILL.md` folders to share with every room. |
 | `AGENT_TERMINAL_HOST` | `127.0.0.1` | Interface to bind. |
 | `AGENT_TERMINAL_TOKEN` | *(unset)* | Shared secret. **Required** for any non-loopback host. |
 | `CODEX_BIN` | ChatGPT.app's `codex` | Path to the Codex binary. |
+
+### Your rooms live outside the checkout
+
+Everything you make — projects, workspaces, agent roster, hidden-project list —
+lives in `AGENT_TERMINAL_HOME`, **not** in this repo. That way two people can work
+from the same code without seeing each other's rooms, and without `git pull`
+overwriting one person's agent roster with the other's.
+
+```
+~/.agent-terminal/
+  projects/<id>/state.json      chat history, sessions, token counters
+  projects/<id>/workspace/      the files agents build
+  agents.json                   your agent roster
+  closed.json                   projects hidden from the tabs
+```
+
+Point it anywhere — including a private git repo of your own if you want your
+rooms backed up or synced between machines:
+
+```bash
+AGENT_TERMINAL_HOME=~/my-agent-rooms node server.js
+```
+
+The first run after upgrading moves anything still sitting in the checkout into
+your home directory automatically, one room at a time, without overwriting
+anything already there.
 
 ### Reaching it from another device
 

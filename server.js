@@ -28,7 +28,21 @@ if (!LOOPBACK && !TOKEN) {
 }
 
 const ROOT = __dirname;
-const PROJECTS_DIR = path.join(ROOT, 'projects');
+
+// ---------------------------------------------------------------- your data
+// Everything you make lives OUTSIDE the checkout: rooms, roster, closed list.
+// It used to live in the repo, which meant two people sharing this code shared
+// each other's rooms — and pulling overwrote your agent roster with theirs.
+//   AGENT_TERMINAL_HOME=~/my-rooms node server.js
+// Point it at a git repo of your own if you want your rooms synced or backed up.
+const expandHome = p => path.resolve(String(p).replace(/^~(?=$|\/)/, process.env.HOME || '~'));
+const DATA_HOME = expandHome(
+  process.env.AGENT_TERMINAL_HOME ||
+  (process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, 'agent-terminal') : '~/.agent-terminal')
+);
+fs.mkdirSync(DATA_HOME, { recursive: true });
+
+const PROJECTS_DIR = path.join(DATA_HOME, 'projects');
 // Optional shared skill library (SKILL.md folders). Point this at a directory and
 // every room links it in, so agents in a room can use the same curated skills you
 // use everywhere else. Off unless set: skill *descriptions* load on every turn, so
@@ -63,6 +77,33 @@ const JANITOR_EVERY = 20;      // cheap memory-janitor pass after this many room
 const HISTORY_REPLAY = 200;    // messages a connecting client gets (older stay on disk)
 
 // ---------------------------------------------------------------- migration
+// v2 kept everything inside the checkout. Move it out, once, on first run — your
+// rooms and roster follow you; the repo goes back to being just the code.
+// Nothing is deleted: on a cross-device HOME this falls back to copy-and-keep.
+// Rescues room-by-room rather than all-or-nothing, and runs on every boot, so it
+// works no matter the order things happen in — including the case where someone
+// pulls first and git strips projects/ from the checkout before this ever runs.
+// Anything still sitting in the old location gets adopted; nothing is overwritten.
+(function migrateOutOfRepo() {
+  const legacyProjects = path.join(ROOT, 'projects');
+  const move = (from, to) => {
+    if (!fs.existsSync(from) || fs.existsSync(to)) return false;
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    try { fs.renameSync(from, to); }
+    catch { fs.cpSync(from, to, { recursive: true }); fs.rmSync(from, { recursive: true, force: true }); } // EXDEV
+    return true;
+  };
+  let moved = 0;
+  if (fs.existsSync(legacyProjects)) {
+    for (const e of fs.readdirSync(legacyProjects, { withFileTypes: true })) {
+      if (e.isDirectory() && move(path.join(legacyProjects, e.name), path.join(PROJECTS_DIR, e.name))) moved++;
+    }
+    try { fs.rmdirSync(legacyProjects); } catch {} // only succeeds once it's empty
+  }
+  for (const f of ['agents.json', 'closed.json']) if (move(path.join(ROOT, f), path.join(DATA_HOME, f))) moved++;
+  if (moved) console.log(`↪ moved ${moved} item(s) out of the checkout into ${DATA_HOME} — the repo now holds only code`);
+})();
+
 // v1 kept a single ./workspace + ./state.json — fold it into projects/drum-machine
 if (!fs.existsSync(PROJECTS_DIR) && fs.existsSync(path.join(ROOT, 'workspace'))) {
   const dir = path.join(PROJECTS_DIR, 'drum-machine');
@@ -87,7 +128,7 @@ if (!fs.existsSync(PROJECTS_DIR) && fs.existsSync(path.join(ROOT, 'workspace')))
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 
 // MCP config handed to Claude agents when a room has 🎮 Roblox mode on
-const MCP_ROBLOX_FILE = path.join(ROOT, 'mcp-roblox.json');
+const MCP_ROBLOX_FILE = path.join(DATA_HOME, 'mcp-roblox.json');
 fs.writeFileSync(MCP_ROBLOX_FILE, JSON.stringify({
   mcpServers: { robloxstudio: { type: 'stdio', command: 'npx', args: ['-y', 'robloxstudio-mcp@latest'], env: {} } },
 }, null, 1));
@@ -539,7 +580,7 @@ class CodexAgent extends AgentRunner {
 }
 
 // ---- ROSTER: persisted in agents.json, editable live from the UI.
-const AGENTS_FILE = path.join(ROOT, 'agents.json');
+const AGENTS_FILE = path.join(DATA_HOME, 'agents.json');
 // Lean default duo — connect more agents anytime via the + connect agent dialog.
 // Claude leads by default: in a leaderless room every message wakes EVERY agent, so
 // cost scales with roster size whether or not there is work to do. With a lead, the
@@ -979,7 +1020,7 @@ Preserve every fact that is still current. Do not add commentary. Reply with jus
 }
 
 // closed projects: hidden from tabs but kept on disk; reopen by creating same name
-const CLOSED_FILE = path.join(ROOT, 'closed.json');
+const CLOSED_FILE = path.join(DATA_HOME, 'closed.json');
 let closedProjects = [];
 try { closedProjects = JSON.parse(fs.readFileSync(CLOSED_FILE, 'utf8')); } catch {}
 function saveClosed() { fs.writeFileSync(CLOSED_FILE, JSON.stringify(closedProjects)); }
@@ -1414,7 +1455,7 @@ ${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => 
     if (fs.existsSync(dir)) {
       const room = rooms.get(id);
       if (room) { room.running = false; for (const a of room.agents) a.kill(); } // stop writers before moving the dir
-      const trash = path.join(ROOT, '.trash');
+      const trash = path.join(DATA_HOME, '.trash');
       fs.mkdirSync(trash, { recursive: true });
       fs.renameSync(dir, path.join(trash, `${id}-${Date.now()}`)); // recoverable, not rm -rf
       closedProjects = closedProjects.filter(x => x !== id); saveClosed();

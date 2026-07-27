@@ -1,6 +1,14 @@
 .playwright-mcp/
 nohup.out
 .trash/
-# per-room symlink to the operator's shared skill library — a machine-specific
-# absolute path, so it must never be committed
-projects/*/workspace/.claude/
+
+# Per-user state — rooms and their workspaces, agent roster, hidden-project list,
+# the generated MCP config. These live in AGENT_TERMINAL_HOME (default
+# ~/.agent-terminal), not the checkout, so two people sharing this repo don't
+# share or overwrite each other's work. Listed here as well so an existing clone
+# that still has them on disk doesn't re-commit them.
+projects/
+agents.json
+closed.json
+mcp-roblox.json
+.claude/

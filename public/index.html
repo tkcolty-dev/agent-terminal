@@ -346,11 +346,13 @@ const input = document.getElementById('input');
 const agentInfo = {}; // id -> {name, color, model, status}
 
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
-// markdown-lite: **bold** and `code` so agent messages read cleanly
+// markdown-lite: clickable links, **bold** and `code` so agent messages read cleanly
 function md(s) {
   return esc(s)
+    .replace(/https?:\/\/[^\s<>"')\]]+/g, u =>
+      `<a href="${u}" target="_blank" style="color:var(--green);text-decoration:underline">${u}</a>`)
     .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
-    .replace(/`([^`\n]+)`/g, '<code style="background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px">$1</code>');
+    .replace(/`([^`\n<]+)`/g, '<code style="background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px">$1</code>');
 }
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
 function atBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 60; }
@@ -726,6 +728,7 @@ function renderUsage(u) {
   }
   bar.title = '$ estimates cover the Claude side only — Codex bills to your ChatGPT plan';
   bar.innerHTML =
+    `<span><a href="/preview/${encodeURIComponent(currentProject)}/" target="_blank" style="color:var(--green);text-decoration:none">🔗 open ${esc(currentProject)} ↗</a></span>` +
     `<span>💰 this room: <b>${kfmt(r.tok)}</b> tok · <b>~$${r.cost.toFixed(2)}</b></span>` +
     `<span>all projects: <b>${kfmt(g.tok)}</b> tok · <b>~$${g.cost.toFixed(2)}</b></span>` + plan;
 }

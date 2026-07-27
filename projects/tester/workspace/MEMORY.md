@@ -15,3 +15,7 @@
 - Round 2 (2026-07-26 22:03): PLAN-round2.md merged from round2-codex.md + round2-claudious.md + round2-panel.md (external Haiku/Sonnet/Opus panel). Headline: lean CLI profiles (-72% cold start, measured), cheap-model routing + zero-token ack-gate, gated keep-warm heartbeat (1h cache TTL is API-only, CLI can't use it). Est. additional 60-80% cost cut. Awaiting user implementation/OK.
 - Round-2 baseline (2026-07-26 22:17, pre-implementation): 941,525 input + 69,947 output + 4,282,872 cached tokens over 30 turns. Snapshot: .notes/bench-r2-before.json. Compare against this after round-2 fixes land.
 - Round-3 candidates (2026-07-27, proposed, not started): (a) run the after-bench vs bench-r2-before.json FIRST to find residual spend; (b) delta-context resumes — send only new chat since last wake, summarize old turns server-side; (c) coalesce/debounce multiple messages into one wake; (d) route [trivial] to a free local model (Ollama) instead of Haiku; (e) Batch API (50% off) for offline jobs like benches/panels; (f) downscale screenshots + reference by path after first view (images re-bill every resumed turn); (g) per-tag output caps (output ≈ 5× input price).
+
+## Harness feedback (2026-07-27)
+- Boss feedback: FEEDBACK-harness.md. Codex worker feedback: FEEDBACK-codex.md.
+- Codex priorities: compact delta wakes, per-turn cost/cache telemetry, atomic file leases, and a browser-test path available without waking another model.

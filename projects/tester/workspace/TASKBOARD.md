@@ -13,3 +13,4 @@
 | Round-2 benchmark baseline | Codex | done | .notes/bench-r2-before.json |
 | Implement round 2 | — | awaiting user OK | ../../../server.js |
 | Breakout game (paused by user) | Codex/— | on hold | game.js |
+| Harness feedback (Codex seat) | Codex | done | FEEDBACK-codex.md |

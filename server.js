@@ -1110,9 +1110,17 @@ const server = http.createServer(async (req, res) => {
 
   // /preview/<project>/<path...>
   let m = p.match(/^\/preview\/([^/]+)\/?(.*)$/);
+  if (p === '/preview' || p === '/preview/' || (m && !rooms.get(m[1]))) {
+    // dead or project-less preview link (agents sometimes post these) → friendly picker
+    const links = listProjects().map(id =>
+      `<li style="margin:8px 0"><a style="color:#7ee787;font-size:18px" href="/preview/${encodeURIComponent(id)}/">▶ ${id}</a></li>`).join('');
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`<body style="background:#0a0e14;color:#c8d3e0;font-family:ui-monospace,Menlo,monospace;padding:40px">
+      <h2 style="letter-spacing:2px;color:#5c6b80">THAT PREVIEW LINK WAS INCOMPLETE — PICK A PROJECT:</h2><ul style="list-style:none;padding:0">${links}</ul></body>`);
+    return;
+  }
   if (m) {
     const room = rooms.get(m[1]);
-    if (!room) { res.writeHead(404); res.end('no such project'); return; }
     const rel = decodeURIComponent(m[2]) || 'index.html';
     const file = path.normalize(path.join(room.workspace, rel));
     if (!file.startsWith(room.workspace)) { res.writeHead(403); res.end(); return; }

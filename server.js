@@ -1588,6 +1588,16 @@ server.listen(PORT, HOST, () => {
   if (!LOOPBACK) console.log(`⚠ bound ${HOST} — reachable off this machine; token auth is ON`);
   console.log(`projects: ${listProjects().join(', ')}`);
   // boot sweep: pick up any messages that arrived before a restart/crash so a
-  // stuck room recovers on its own instead of waiting for the user to speak again
-  setTimeout(() => { for (const room of rooms.values()) room.scheduleTurns(); }, 1500);
+  // stuck room recovers on its own instead of waiting for the user to speak again.
+  // It ANNOUNCES what it resumes (PR #2 feedback: silent resumption spent money and
+  // diverged workspace from transcript), and AGENT_TERMINAL_NO_RESUME=1 disables it.
+  if (process.env.AGENT_TERMINAL_NO_RESUME !== '1') {
+    setTimeout(() => {
+      for (const room of rooms.values()) {
+        const pending = room.agents.some(a => !a.busy && room.messages.slice(a.seenUpTo).some(m => room.wakes(m, a)));
+        if (pending) room.sys('⟳ resuming after a server restart — unread messages are being picked up.');
+        room.scheduleTurns();
+      }
+    }, 1500);
+  }
 });

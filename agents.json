@@ -24,5 +24,21 @@
   "model": "claude-opus-4-8",
   "modelFlag": "claude-opus-4-8",
   "limit": 1000000
+ },
+ {
+  "id": "sonnet",
+  "name": "Sonnet",
+  "color": "#7ee787",
+  "type": "claude",
+  "model": "claude-sonnet-5",
+  "modelFlag": "claude-sonnet-5"
+ },
+ {
+  "id": "haiku",
+  "name": "Haiku",
+  "color": "#f778ba",
+  "type": "claude",
+  "model": "claude-haiku-4-5-20251001",
+  "modelFlag": "claude-haiku-4-5-20251001"
  }
 ]

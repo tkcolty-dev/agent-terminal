@@ -47,6 +47,12 @@ if (!fs.existsSync(PROJECTS_DIR) && fs.existsSync(path.join(ROOT, 'workspace')))
 }
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 
+// MCP config handed to Claude agents when a room has 🎮 Roblox mode on
+const MCP_ROBLOX_FILE = path.join(ROOT, 'mcp-roblox.json');
+fs.writeFileSync(MCP_ROBLOX_FILE, JSON.stringify({
+  mcpServers: { robloxstudio: { type: 'stdio', command: 'npx', args: ['-y', 'robloxstudio-mcp@latest'], env: {} } },
+}, null, 1));
+
 // ---------------------------------------------------------------- agents
 class AgentRunner {
   constructor(room, opts) {
@@ -162,6 +168,9 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       prompt += (this.briefedV ? '(Updated room briefing — rules have changed:)\n\n' : '') + this.briefing() + '\n\n';
       this.briefedV = BRIEF_V;
     }
+    if (this.room.robloxMode) {
+      prompt += `NOTE: 🎮 ROBLOX MODE is ON for this room. Claude-family agents have Roblox Studio MCP tools (get_file_tree, create_object, set_script_source, execute_luau, start_playtest, capture_screenshot, …) — Roblox Studio must be open with the MCP plugin for them to respond. Codex has no Studio access: Codex writes Luau/logic into workspace files, Claude-family agents apply and test them in Studio. Verify changes with playtest output or a Studio screenshot saved to the workspace.\n\n`;
+    }
     const live = this.room.agents.filter(a => a !== this && a.busy);
     if (live.length) {
       prompt += `--- LIVE RIGHT NOW (current, not cached) ---\n` + live.map(a =>
@@ -267,6 +276,7 @@ class ClaudeAgent extends AgentRunner {
   command() {
     const args = ['-p', '--output-format', 'stream-json', '--verbose',
       '--dangerously-skip-permissions', '--max-turns', '12'];
+    if (this.room.robloxMode) args.push('--mcp-config', MCP_ROBLOX_FILE); // Studio tools only when the room wants them
     if (this.modelFlag) args.push('--model', this.modelFlag);
     if (this.sessionId) args.push('--resume', this.sessionId);
     return { cmd: 'claude', args };
@@ -436,6 +446,7 @@ class Room {
     this.autoTurns = 0;
     this.running = true;
     this.talkMode = 'turns'; // 'turns' = one agent speaks at a time; 'parallel' = free-for-all
+    this.robloxMode = false; // when true, Claude agents load the Roblox Studio MCP tools
     this.capNoticeShown = false;
     this.lastTree = '';
     this.saveTimer = null;
@@ -449,6 +460,7 @@ class Room {
       const s = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
       this.messages.push(...(s.messages || []));
       if (s.talkMode) this.talkMode = s.talkMode;
+      this.robloxMode = !!s.robloxMode;
       for (const sa of s.agents || []) {
         const a = this.agents.find(x => x.id === sa.id);
         if (a) {
@@ -469,6 +481,7 @@ class Room {
     this.saveTimer = setTimeout(() => {
       const state = {
         talkMode: this.talkMode,
+        robloxMode: this.robloxMode,
         messages: this.messages,
         agents: this.agents.map(a => ({ id: a.id, sessionId: a.sessionId, briefedV: a.briefedV || 0, seenUpTo: a.seenUpTo, tokens: a.tokens, stats: a.stats, model: a.model, sessionTurns: a.sessionTurns || 0 })),
       };
@@ -644,6 +657,7 @@ class Room {
       claims: this.claimsMap(),
       paused: !this.running,
       talkMode: this.talkMode,
+      robloxMode: this.robloxMode,
       usage: { room: roomUsage(this), global: globalUsage(), rateLimit: lastRateLimit },
       port: PORT,
     };
@@ -839,6 +853,41 @@ const server = http.createServer(async (req, res) => {
       room.scheduleTurns();
     }
     res.writeHead(200); res.end('{"ok":true}');
+    return;
+  }
+
+  if (p === '/roblox' && req.method === 'POST') {
+    const { project, on } = await readBody(req);
+    const room = getRoom(project);
+    if (room) {
+      room.robloxMode = !!on;
+      room.saveState();
+      room.sys(on
+        ? '🎮 Roblox mode ON — Claude agents now load Roblox Studio tools. Open Roblox Studio with the MCP plugin before assigning Studio work.'
+        : '🎮 Roblox mode OFF.');
+      room.broadcast('roblox', { on: room.robloxMode });
+    }
+    res.writeHead(200); res.end('{"ok":true}');
+    return;
+  }
+
+  // PUT /upload/<project>/<path> — drop files (game files, photos…) into a workspace
+  const um = p.match(/^\/upload\/([^/]+)\/(.+)$/);
+  if (um && req.method === 'PUT') {
+    const room = getRoom(um[1]);
+    if (!room) { res.writeHead(404); res.end('no such project'); return; }
+    const rel = decodeURIComponent(um[2]).replace(/^\/+/, '');
+    const file = path.normalize(path.join(room.workspace, rel));
+    if (!file.startsWith(room.workspace)) { res.writeHead(403); res.end(); return; }
+    const chunks = []; let size = 0;
+    req.on('data', c => { size += c.length; if (size > 200 * 1024 * 1024) { req.destroy(); } else chunks.push(c); });
+    req.on('end', () => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, Buffer.concat(chunks));
+      room.sys(`⬆ you added ${rel} (${size > 1048576 ? (size/1048576).toFixed(1)+' MB' : Math.ceil(size/1024)+' kB'})`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
     return;
   }
 

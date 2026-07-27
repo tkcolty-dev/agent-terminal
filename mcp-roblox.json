@@ -1,0 +1,13 @@
+{
+ "mcpServers": {
+  "robloxstudio": {
+   "type": "stdio",
+   "command": "npx",
+   "args": [
+    "-y",
+    "robloxstudio-mcp@latest"
+   ],
+   "env": {}
+  }
+ }
+}

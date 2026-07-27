@@ -95,6 +95,14 @@
   .dialog input:focus, .dialog select:focus { border-color: #35506e; }
   .dialog .row2 { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
 
+  /* drag & drop overlay */
+  .drop-overlay {
+    position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center;
+    background: rgba(5,10,16,.85); border: 3px dashed var(--green); border-radius: 12px;
+    color: var(--green); font-size: 20px; font-weight: 700; letter-spacing: 2px; pointer-events: none;
+  }
+  .drop-overlay[hidden] { display: none; }
+
   /* usage bar */
   .usagebar { display: flex; gap: 18px; align-items: center; padding: 6px 16px; border-top: 1px solid var(--border); background: var(--panel); font-size: 11px; color: var(--dim); white-space: nowrap; overflow-x: auto; }
   .usagebar b { color: var(--text); font-weight: 600; }
@@ -216,6 +224,8 @@
         <div class="connect-btn" id="connectBtn">+ connect agent</div>
       </div>
       <div class="pane" id="pane-files" hidden>
+        <div class="connect-btn" id="uploadBtn">⬆ add files (or drag &amp; drop anywhere)</div>
+        <input type="file" id="fileInput" multiple hidden>
         <div class="files" id="files"><div class="nofiles">empty — give them a task</div></div>
       </div>
       <div class="pane" id="pane-stats" hidden>
@@ -237,6 +247,7 @@
           <option value="turns">🗣 one at a time</option>
           <option value="parallel">🗫 all at once</option>
         </select>
+        <button class="talk-sel" id="rbxBtn" title="give Claude agents Roblox Studio tools (Studio must be open with the MCP plugin)">🎮 roblox: off</button>
       </div>
       <div class="usagebar" id="usagebar">💰 usage: waiting for first turn…</div>
     </div>
@@ -246,6 +257,7 @@
     </div>
   </div>
 </div>
+<div class="drop-overlay" id="dropOverlay" hidden>⬇ DROP FILES INTO THIS PROJECT</div>
 <div class="overlay" id="projOverlay" hidden>
   <div class="dialog">
     <h2 id="projDlgTitle">PROJECT</h2>
@@ -599,6 +611,7 @@ function connect(project) {
       setPaused(ev.paused);
       if (ev.usage) renderUsage(ev.usage);
       document.getElementById('talkSel').value = ev.talkMode || 'turns';
+      setRoblox(ev.robloxMode);
       schedulePreviewReload(ev.files || [], true);
       scrollDown(true);
       if (!ev.messages.length) addMsg({ from: 'system', text: '● room open — your agents are standing by. Type a task below.', ts: Date.now() });
@@ -624,6 +637,7 @@ function connect(project) {
       renderTabs();
     }
     else if (ev.type === 'talkmode') document.getElementById('talkSel').value = ev.mode;
+    else if (ev.type === 'roblox') setRoblox(ev.on);
     else if (ev.type === 'agents') {
       for (const k in agentInfo) delete agentInfo[k];
       for (const a of ev.agents) agentInfo[a.id] = a;
@@ -707,6 +721,34 @@ document.getElementById('projDelete').onclick = () => {
 // ---- talk mode
 document.getElementById('talkSel').onchange = e =>
   fetch('/talkmode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ project: currentProject, mode: e.target.value }) });
+
+// ---- roblox mode toggle
+let robloxOn = false;
+function setRoblox(on) {
+  robloxOn = !!on;
+  const b = document.getElementById('rbxBtn');
+  b.textContent = robloxOn ? '🎮 roblox: ON' : '🎮 roblox: off';
+  b.style.color = robloxOn ? '#7ee787' : '';
+}
+document.getElementById('rbxBtn').onclick = () =>
+  fetch('/roblox', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ project: currentProject, on: !robloxOn }) });
+
+// ---- file upload (button + drag & drop)
+async function uploadFiles(files) {
+  for (const f of files) {
+    await fetch(`/upload/${encodeURIComponent(currentProject)}/${encodeURIComponent(f.name)}`, { method: 'PUT', body: f });
+  }
+}
+document.getElementById('uploadBtn').onclick = () => document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange = e => { uploadFiles([...e.target.files]); e.target.value = ''; };
+let dragDepth = 0;
+window.addEventListener('dragenter', e => { e.preventDefault(); if (++dragDepth === 1) document.getElementById('dropOverlay').hidden = false; });
+window.addEventListener('dragleave', e => { e.preventDefault(); if (--dragDepth <= 0) { dragDepth = 0; document.getElementById('dropOverlay').hidden = true; } });
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => {
+  e.preventDefault(); dragDepth = 0; document.getElementById('dropOverlay').hidden = true;
+  if (e.dataTransfer?.files?.length) uploadFiles([...e.dataTransfer.files]);
+});
 
 // ---- connect agent dialog
 const overlay = document.getElementById('overlay');

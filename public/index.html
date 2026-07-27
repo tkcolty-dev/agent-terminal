@@ -626,6 +626,7 @@ function renderTabs() {
 
 function connect(project) {
   if (es) es.close();
+  SND.booted = false; // silence while history replays — re-armed after hello finishes
   currentProject = project || '';
   history.replaceState(null, '', currentProject ? '/?project=' + encodeURIComponent(currentProject) : '/');
   chat.innerHTML = '<div class="msg system"><div class="body">connecting…</div></div>';
@@ -651,7 +652,8 @@ function connect(project) {
       setRoblox(ev.robloxMode);
       schedulePreviewReload(ev.files || [], true);
       scrollDown(true);
-      SND.booted = false; setTimeout(() => { SND.booted = true; }, 600); // don't replay history as a symphony
+      clearTimeout(SND._bootT);
+      SND._bootT = setTimeout(() => { SND.booted = true; }, 600); // don't replay history as a symphony
       if (!ev.messages.length) addMsg({ from: 'system', text: '● room open — your agents are standing by. Type a task below.', ts: Date.now() });
     }
     else if (ev.type === 'msg') addMsg(ev);

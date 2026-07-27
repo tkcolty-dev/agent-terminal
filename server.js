@@ -15,9 +15,9 @@ const PORT = 4600;
 const ROOT = __dirname;
 const PROJECTS_DIR = path.join(ROOT, 'projects');
 const CODEX_BIN = '/Applications/ChatGPT.app/Contents/Resources/codex';
-const MAX_AUTO_TURNS = 16;     // agent-to-agent turns allowed per user message
+const MAX_AUTO_TURNS = 8;      // agent-to-agent turns allowed per user message (keep chatter cheap)
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
-const BRIEF_V = 5;             // bump to re-send the room briefing to existing agents
+const BRIEF_V = 9;             // bump to re-send the room briefing to existing agents
 
 // ---------------------------------------------------------------- migration
 // v1 kept a single ./workspace + ./state.json — fold it into projects/drum-machine
@@ -76,7 +76,7 @@ class AgentRunner {
 
   briefing() {
     const others = this.room.agents.filter(a => a !== this);
-    const team = others.map(a => `- ${a.name} (model: ${a.model})`).join('\n');
+    const team = others.map(a => `- ${a.name} (model: ${a.model})${a.role === 'lead' ? ' — 👑 LEAD: plans & assigns all work' : ''}`).join('\n');
     return `You are ${this.name} (model: ${this.model}), one agent in a live multi-agent team room called AGENT TERMINAL. Current project: "${this.room.id}".
 
 Your teammates in this room:
@@ -102,7 +102,30 @@ RULES OF THE ROOM:
 14. TASK BOARD: TASKBOARD.md in the workspace is the shared board (a markdown table: task | owner | status | files). CLAIM work there before starting, update your status (planning/working/testing/done) as you go, and check it before touching files another row owns.
 15. LIVE STATUS: your prompt may include a "LIVE RIGHT NOW" section listing teammates who are mid-turn and the files they're editing. NEVER edit those files until they finish — pick other work or wait.
 16. CHAT HYGIENE: describe changes as one-line summaries or tiny diffs — never paste whole files into chat. In MEMORY.md keep one section per topic and prune superseded bullets when you edit. If the shared browser is busy, retry shortly or verify via curl/node instead.
-17. TEACHING CODE: the user reads your code to learn. Write beginner-friendly code — clear names, short functions, and generous comments that explain WHAT each chunk does in plain words (comment every function and any tricky line). Keep a README.md in the workspace that explains in simple language what each file does and how the pieces fit together; update it whenever the structure changes. In chat, explain things simply — no unexplained jargon.`;
+17. TEACHING CODE: the user reads your code to learn. Write beginner-friendly code — clear names, short functions, and generous comments that explain WHAT each chunk does in plain words (comment every function and any tricky line). Keep a README.md in the workspace that explains in simple language what each file does and how the pieces fit together; update it whenever the structure changes. In chat, explain things simply — no unexplained jargon.
+18. TOKEN ECONOMY — tokens are precious; make every turn count:
+   - If a message needs NOTHING from you, reply with exactly [SKIP] — it will not be posted and wakes nobody.
+   - NEVER post acknowledgment-only replies ("ok", "got it", "holding", "standing by").
+   - Bundle your work: do EVERYTHING needed in one turn, then ONE short reply (≤3 sentences). Ask all your questions at once instead of back-and-forth.
+   - Don't re-read files you already know, don't re-verify what a teammate verified, don't re-explain what's already in chat.` +
+   (this.role === 'lead' ? `
+
+YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
+- USER COMMANDS ARE LAW. Do EXACTLY what the user asked — nothing more, nothing less. NEVER invent a project or pick a direction the user didn't give. If the request is ambiguous, ask the user ONE short clarifying question and assign NOTHING until they answer.
+- When the user gives an order, relay it to workers IMMEDIATELY in your first reply (@mention + concrete task). Don't sit on instructions.
+- If the user says stop/pause/hold/wait in any form: assign nothing, tell workers to stand down, confirm in one line.
+- The user's messages come to YOU. You own the plan, the TASKBOARD.md, and the final report.
+- You do NOT build product code yourself (tiny fixes are fine) — you break work into clear tasks and assign each with an @mention. Workers ONLY wake when you @mention them.
+- ASSIGNMENT FORMAT — scannable, one line per worker, nothing else:
+  @Codex → build game.js (engine + input)
+  @Claude → style index.html, then browser-test
+- Size every task so a worker can FINISH IT IN ONE TURN. Bigger jobs = several short rounds.
+- Assign both workers in ONE message when tasks are independent, so they run in parallel.
+- NEVER GO SILENT: after every worker report you MUST reply with either (a) the next one-line assignment(s), or (b) the finish line. The user must never wonder what's happening.
+- THE FINISH LINE: when the user's request is fully done and verified, your final message MUST start with exactly "✅ DONE — " followed by a one-line summary. This triggers the big completion banner the user watches for. Never use that prefix before everything is truly done.
+- Be extremely token-frugal: short assignments, short reports, no filler.` :
+   `
+19. CHAIN OF COMMAND: this room has a LEAD agent who plans and assigns. You wake when the lead @mentions you with a task. Do the task fully, then reply once with results (the lead sees it automatically). Don't grab new scope the lead didn't assign — [SKIP] anything that isn't yours. EXCEPTION: if the USER @mentions you directly, that is a direct order — obey it exactly and immediately, it outranks the lead.`);
   }
 
   unseen() {
@@ -143,7 +166,9 @@ RULES OF THE ROOM:
     try {
       const reply = await this.spawnTurn(prompt);
       const text = (reply || '').trim();
-      if (text) this.room.post(this.id, this.name, text);
+      // [SKIP] = agent explicitly had nothing to say — post nothing, wake nobody
+      if (text && !text.toUpperCase().startsWith('[SKIP]')) this.room.post(this.id, this.name, text);
+      else this.activity('⏭ turn ended with nothing to post'); // visible, so silence is never a mystery
     } catch (err) {
       this.room.sys(`⚠ ${this.name} turn failed: ${String(err).slice(0, 300)}`);
     } finally {
@@ -159,6 +184,7 @@ RULES OF THE ROOM:
       checkLimitWarnings(this);
       broadcastUsage();
       this.room.scheduleTurns();
+      this.room.deadAirCheck();
     }
   }
 
@@ -208,7 +234,7 @@ let lastRateLimit = null; // latest Claude plan window info seen from any agent
 class ClaudeAgent extends AgentRunner {
   command() {
     const args = ['-p', '--output-format', 'stream-json', '--verbose',
-      '--dangerously-skip-permissions', '--max-turns', '60'];
+      '--dangerously-skip-permissions', '--max-turns', '40'];
     if (this.modelFlag) args.push('--model', this.modelFlag);
     if (this.sessionId) args.push('--resume', this.sessionId);
     return { cmd: 'claude', args };
@@ -309,10 +335,10 @@ class CodexAgent extends AgentRunner {
 
 // ---- ROSTER: persisted in agents.json, editable live from the UI.
 const AGENTS_FILE = path.join(ROOT, 'agents.json');
+// Lean default duo — connect more agents anytime via the + connect agent dialog
 const DEFAULT_DEFS = [
   { id: 'claude', name: 'Claude', color: '#ff9668', type: 'claude', model: 'claude (loading…)' },
   { id: 'codex', name: 'Codex', color: '#58c4dc', type: 'codex', model: 'gpt-5 · codex-cli 0.145' },
-  { id: 'haiku', name: 'Haiku', color: '#d2a8ff', type: 'claude', model: 'claude-haiku-4-5', modelFlag: 'claude-haiku-4-5-20251001' },
 ];
 let agentDefs;
 try { agentDefs = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch { agentDefs = DEFAULT_DEFS; }
@@ -427,10 +453,30 @@ class Room {
     if (img) m.img = img;
     this.messages.push(m);
     this.broadcast('msg', m);
+    // the lead declaring "✅ DONE" fires the completion banner in the UI
+    const lead = this.agents.find(a => a.role === 'lead');
+    if (lead && from === lead.id && /^✅\s*DONE/i.test(text.trim())) {
+      this.broadcast('done', { text: text.trim().slice(0, 200) });
+    }
     this.saveState();
     return m;
   }
   sys(text) { this.post('system', 'system', text); }
+
+  // If the lead spoke, assigned nobody, and the room went quiet — tell the user why nothing is happening.
+  deadAirCheck() {
+    if (this.agents.some(a => a.busy)) return;
+    const last = this.messages[this.messages.length - 1];
+    if (!last) return;
+    const lead = this.agents.find(a => a.role === 'lead');
+    if (!lead || last.from !== lead.id) return;
+    if (this.mentionTargets(last.text).size) return;          // it assigned someone
+    if (/^✅\s*DONE/i.test(last.text.trim())) return;          // it finished
+    if (last.text.includes('?')) return;                       // it asked the user something
+    if (this._deadAirAt === last.n) return;                     // already hinted for this message
+    this._deadAirAt = last.n;
+    this.sys('💤 Boss spoke but assigned nobody — the room is idle. Reply to nudge it, or @mention a worker directly.');
+  }
 
   claimsMap() {
     const claims = {};
@@ -442,21 +488,33 @@ class Room {
   }
   broadcastClaims() { this.broadcast('claims', { claims: this.claimsMap() }); }
 
-  // @Name tokens that match a real agent in the room (case-insensitive)
+  // @Name tokens that match a real agent (case-insensitive; first word of
+  // multi-word names counts, so "@Claudious" matches "Claudious (Opus 4.8)")
   mentionTargets(text) {
     const targets = new Set();
     for (const m of String(text).matchAll(/@([A-Za-z0-9_-]+)/g)) {
-      const a = this.agents.find(x => x.name.toLowerCase() === m[1].toLowerCase());
+      const tok = m[1].toLowerCase();
+      const a = this.agents.find(x => {
+        const nm = x.name.toLowerCase();
+        return nm === tok || nm.split(/[^a-z0-9]+/)[0] === tok || x.id === tok;
+      });
       if (a) targets.add(a.id);
     }
     return targets;
   }
 
-  // Does this message wake this agent? (@mentions route; [IDLE] doesn't wake)
+  // Does this message wake this agent? (@mentions route; [IDLE] doesn't wake;
+  // with a lead in the room: user+worker messages go to the lead, lead assigns via @mentions)
   wakes(m, agent) {
     if (m.from === 'system' || m.from === agent.id) return false;
     const targets = this.mentionTargets(m.text);
     if (targets.size) return targets.has(agent.id); // routed: only mentioned agents wake
+    const lead = this.agents.find(a => a.role === 'lead');
+    if (lead) {
+      if (m.from === 'user') return agent === lead;      // user talks to the boss
+      if (m.from === lead.id) return false;              // boss must @mention to assign
+      return agent === lead && !saidIdle(m.text);        // worker reports wake the boss
+    }
     if (m.from === 'user') return true;
     return !saidIdle(m.text);
   }
@@ -515,7 +573,7 @@ class Room {
 
   agentList() {
     return this.agents.map(a => ({
-      id: a.id, name: a.name, color: a.color, model: a.model, status: a.status,
+      id: a.id, name: a.name, color: a.color, model: a.model, status: a.status, role: a.role || null,
       tokens: a.tokens, stats: a.stats,
       limit: agentLimit(a.id), usedGlobal: globalAgentTokens(a.id),
     }));
@@ -697,9 +755,26 @@ const server = http.createServer(async (req, res) => {
     const { text, project } = await readBody(req);
     const room = getRoom(project);
     if (room && text && text.trim()) {
-      room.running = true; room.autoTurns = 0; room.capNoticeShown = false;
-      room.post('user', 'You', text.trim());
-      room.scheduleTurns();
+      const cmd = text.trim().toLowerCase().replace(/[!.…\s]+$/, '');
+      if (cmd === 'stop' || cmd === 'halt') {
+        // typed commands act INSTANTLY, like the buttons — then agents get told
+        room.running = false;
+        for (const a of room.agents) a.kill();
+        room.post('user', 'You', text.trim());
+        room.sys('⏹ stopped instantly — agent turns killed. Say anything to resume.');
+        room.broadcast('paused', { paused: true });
+      } else if (cmd === 'pause' || cmd === 'wait' || cmd === 'hold') {
+        room.running = false;
+        room.post('user', 'You', text.trim());
+        room.sys('⏸ paused instantly — current turns finish, nothing new starts. Say anything to resume.');
+        room.broadcast('paused', { paused: true });
+      } else {
+        room.running = true; room.autoTurns = 0; room.capNoticeShown = false;
+        for (const a of room.agents) a.limitNotified = false; // benched agents re-announce so silence is explained
+        room.broadcast('paused', { paused: false });
+        room.post('user', 'You', text.trim());
+        room.scheduleTurns();
+      }
     }
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}');
     return;
@@ -758,14 +833,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/agents/add' && req.method === 'POST') {
-    const { name, type, modelFlag } = await readBody(req);
+    const { name, type, modelFlag, role } = await readBody(req);
     const id = slug(name);
     if (!id || !['claude', 'codex'].includes(type)) { res.writeHead(400); res.end('{"error":"bad agent"}'); return; }
     if (agentDefs.some(d => d.id === id)) { res.writeHead(409); res.end('{"error":"name taken"}'); return; }
+    if (role === 'lead' && agentDefs.some(d => d.role === 'lead')) { res.writeHead(409); res.end('{"error":"there is already a lead"}'); return; }
     const def = {
       id, name: name.trim(), color: nextColor(), type,
       model: type === 'codex' ? 'gpt-5 · codex-cli 0.145' : (modelFlag || 'claude'),
     };
+    if (role === 'lead') def.role = 'lead';
     if (type === 'claude' && modelFlag) def.modelFlag = modelFlag;
     agentDefs.push(def);
     saveDefs();

@@ -124,13 +124,29 @@
   .file .claim { margin-left: 8px; font-size: 10px; }
 
   /* live NOW strip */
-  .nowstrip { border-bottom: 1px solid var(--border); background: #0d1420; padding: 6px 16px; font-size: 11.5px; }
+  .nowstrip { border-bottom: 1px solid rgba(40,200,64,.35); background: rgba(40,200,64,.07); padding: 8px 16px; font-size: 12.5px; }
   .nowstrip[hidden] { display: none; }
-  .nowrow { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--dim); }
-  .nowrow b { font-weight: 700; }
-  .nowrow .doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-  .spinner { display: inline-block; width: 10px; text-align: center; color: var(--green); animation: spin 1s steps(4) infinite; }
+  .nowrow { display: flex; align-items: center; gap: 10px; padding: 3px 0; color: var(--dim); }
+  .nowrow b { font-weight: 700; font-size: 13px; }
+  .nowrow .doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); flex: 1; }
+  .nowrow .elapsed { color: var(--green); font-size: 11px; white-space: nowrap; }
+  .spinner { display: inline-block; width: 12px; text-align: center; color: var(--green); animation: spin 1s steps(4) infinite; }
   @keyframes spin { 0% {content:''} }
+
+  /* completion banner */
+  .done-banner {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+    background: rgba(40,200,64,.14); border-bottom: 2px solid var(--green);
+    padding: 14px 20px; font-size: 15px; font-weight: 700; color: var(--green);
+    animation: dropin .4s ease; backdrop-filter: blur(4px);
+  }
+  .done-banner .snippet { display: block; font-weight: 400; font-size: 12px; color: var(--text); margin-top: 4px; }
+  @keyframes dropin { from { transform: translateY(-100%); } }
+  .chat-wrap { position: relative; }
+
+  /* titlebar working chip */
+  .work-chip { font-size: 11px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border); color: var(--dim); }
+  .work-chip.on { color: var(--green); border-color: rgba(40,200,64,.5); background: rgba(40,200,64,.08); animation: pulse 1.2s infinite; }
 
   /* pinned task board */
   .board { border-bottom: 1px solid var(--border); background: var(--panel); max-height: 150px; overflow-y: auto; }
@@ -181,6 +197,7 @@
   <div class="titlebar">
     <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
     <div class="title">AGENT TERMINAL — MULTI-AGENT ROOM</div>
+    <span class="work-chip" id="workChip">● idle</span>
     <a class="btn" href="/usage" target="_blank" style="color:#79c0ff;text-decoration:none">📊 Usage</a>
     <button class="btn preview" id="previewBtn">▶ Live Build</button>
     <button class="btn" id="pauseBtn" style="color:#febc2e">⏸ Pause</button>
@@ -206,6 +223,7 @@
       </div>
     </div>
     <div class="chat-wrap">
+      <div class="done-banner" id="doneBanner" hidden></div>
       <div class="nowstrip" id="nowstrip" hidden></div>
       <div class="board" id="board" hidden>
         <div class="board-head" id="boardHead">TASK BOARD<span class="chev" id="boardChev">▾</span></div>
@@ -261,6 +279,9 @@
         <option value="claude-haiku-4-5-20251001">Haiku 4.5 (fast)</option>
       </select>
     </div>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:12px">
+      <input type="checkbox" id="agLead"> 👑 make this the LEAD — it orchestrates and assigns work to everyone else
+    </label>
     <div class="row2">
       <button class="btn" id="agCancel">cancel</button>
       <button class="btn preview" id="agConnect">connect</button>
@@ -275,6 +296,12 @@ const input = document.getElementById('input');
 const agentInfo = {}; // id -> {name, color, model, status}
 
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+// markdown-lite: **bold** and `code` so agent messages read cleanly
+function md(s) {
+  return esc(s)
+    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`\n]+)`/g, '<code style="background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px">$1</code>');
+}
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
 function atBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 60; }
 function scrollDown(force) { if (force || atBottom()) chat.scrollTop = chat.scrollHeight; }
@@ -293,7 +320,8 @@ function addMsg(m) {
   } else {
     const name = m.from === 'user' ? 'you' : esc(m.name);
     const color = m.from === 'user' ? 'var(--user)' : (agentInfo[m.from]?.color || 'var(--text)');
-    div.innerHTML = `<div class="head" style="color:${color}">${name}<span class="time">${fmtTime(m.ts)}</span>${idle ? '<span class="idle-tag">idle — waiting</span>' : ''}</div><div class="body">${esc(text)}</div>`;
+    const crown = agentInfo[m.from]?.role === 'lead' ? ' 👑' : '';
+    div.innerHTML = `<div class="head" style="color:${color}">${name}${crown}<span class="time">${fmtTime(m.ts)}</span>${idle ? '<span class="idle-tag">idle — waiting</span>' : ''}</div><div class="body">${md(text)}</div>`;
   }
   chat.appendChild(div);
   scrollDown(stick || m.from === 'user');
@@ -314,15 +342,52 @@ function addActivity(a) {
   renderNow();
 }
 
+const busySince = {};
+function fmtElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  return s < 60 ? s + 's' : Math.floor(s/60) + 'm ' + (s%60) + 's';
+}
 function renderNow() {
   const strip = document.getElementById('nowstrip');
   const busy = Object.values(agentInfo).filter(a => a.status && a.status !== 'idle');
+  // titlebar chip + browser tab title always reflect working state
+  const chip = document.getElementById('workChip');
+  if (busy.length) {
+    chip.className = 'work-chip on';
+    chip.textContent = '⚙ WORKING: ' + busy.map(a => a.name).join(', ');
+    document.title = '⚙ working… — AGENT TERMINAL';
+  } else {
+    chip.className = 'work-chip';
+    chip.textContent = '● idle — waiting for you';
+    document.title = 'AGENT TERMINAL';
+  }
   if (!busy.length) { strip.hidden = true; return; }
   strip.hidden = false;
   strip.innerHTML = busy.map(a =>
     `<div class="nowrow"><span class="spinner">◐</span><b style="color:${a.color}">${esc(a.name)}</b>` +
-    `<span class="doing">${a.status === 'thinking' ? 'thinking…' : esc(lastAct[a.id] || 'working…')}</span></div>`
+    `<span class="doing">${a.status === 'thinking' ? 'thinking…' : esc(lastAct[a.id] || 'working…')}</span>` +
+    `<span class="elapsed">⏱ ${fmtElapsed(Date.now() - (busySince[a.id] || Date.now()))}</span></div>`
   ).join('');
+}
+setInterval(() => { if (!document.getElementById('nowstrip').hidden) renderNow(); }, 1000);
+
+function showDone(text) {
+  const b = document.getElementById('doneBanner');
+  b.innerHTML = `✅ TASK COMPLETE<span class="snippet">${md(text)}</span>`;
+  b.hidden = false;
+  clearTimeout(showDone.t);
+  showDone.t = setTimeout(() => { b.hidden = true; }, 15000);
+  b.onclick = () => { b.hidden = true; };
+  try { // little two-note chime
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [[660, 0], [990, .15]].forEach(([f, d]) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = f; o.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(.12, ctx.currentTime + d);
+      g.gain.exponentialRampToValueAtTime(.001, ctx.currentTime + d + .3);
+      o.start(ctx.currentTime + d); o.stop(ctx.currentTime + d + .3);
+    });
+  } catch {}
 }
 
 function kfmt(n) { return n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n); }
@@ -360,7 +425,7 @@ function renderAgents() {
       <div class="agent-card">
         <span class="agent-kick" data-kick="${id}" title="disconnect">✕</span>
         <div class="row">
-          <span class="agent-name" style="color:${a.color}">${esc(a.name)}</span>
+          <span class="agent-name" style="color:${a.color}">${esc(a.name)}${a.role === 'lead' ? ' 👑' : ''}</span>
           <span class="status-dot ${a.status}"></span>
         </div>
         <div class="agent-model">${esc(a.model || '')}</div>
@@ -542,8 +607,13 @@ function connect(project) {
     else if (ev.type === 'activity') addActivity(ev);
     else if (ev.type === 'status') {
       const a = agentInfo[ev.agent];
-      if (a) { a.status = ev.status; if (ev.model) a.model = ev.model; renderAgents(); renderNow(); }
+      if (a) {
+        if (ev.status !== 'idle' && a.status === 'idle') busySince[ev.agent] = Date.now();
+        if (ev.status === 'idle') delete busySince[ev.agent];
+        a.status = ev.status; if (ev.model) a.model = ev.model; renderAgents(); renderNow();
+      }
     }
+    else if (ev.type === 'done') showDone(ev.text);
     else if (ev.type === 'files') { renderFiles(ev.files); refreshBoard(ev.files); schedulePreviewReload(ev.files); }
     else if (ev.type === 'claims') { claims = ev.claims || {}; renderFiles(); }
     else if (ev.type === 'paused') setPaused(ev.paused);
@@ -652,8 +722,8 @@ document.getElementById('agConnect').onclick = async () => {
   const modelFlag = document.getElementById('agModel').value;
   if (!name) return alert('Give the agent a name');
   const r = await fetch('/agents/add', { method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, type, modelFlag: type === 'claude' ? modelFlag : undefined }) });
-  if (r.status === 409) return alert('That name is taken');
+    body: JSON.stringify({ name, type, modelFlag: type === 'claude' ? modelFlag : undefined, role: document.getElementById('agLead').checked ? 'lead' : undefined }) });
+  if (r.status === 409) return alert((await r.json()).error || 'That name is taken');
   if (!r.ok) return alert('Could not connect agent');
   overlay.hidden = true;
   document.getElementById('agName').value = '';

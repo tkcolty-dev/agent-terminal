@@ -1,34 +1,28 @@
 [
  {
-  "id": "claude",
-  "name": "Claude",
-  "color": "#ff9668",
-  "type": "claude",
-  "model": "claude (loading…)"
- },
- {
   "id": "codex",
   "name": "Codex",
   "color": "#58c4dc",
   "type": "codex",
-  "model": "gpt-5 · codex-cli 0.145"
+  "model": "gpt-5 · codex-cli 0.145",
+  "limit": 1000000
  },
  {
-  "id": "haiku",
-  "name": "Haiku",
+  "id": "boss",
+  "name": "Boss",
   "color": "#d2a8ff",
   "type": "claude",
-  "model": "claude-haiku-4-5",
-  "modelFlag": "claude-haiku-4-5-20251001",
-  "limit": null
+  "model": "claude",
+  "role": "lead",
+  "limit": 20000000
  },
  {
-  "id": "scout",
-  "name": "Scout",
-  "color": "#7ee787",
+  "id": "claudious-opus-48",
+  "name": "Claudious (Opus 4.8",
+  "color": "#ff9668",
   "type": "claude",
-  "model": "claude-sonnet-5",
-  "modelFlag": "claude-sonnet-5",
-  "limit": null
+  "model": "claude-opus-4-8",
+  "modelFlag": "claude-opus-4-8",
+  "limit": 1000000
  }
 ]

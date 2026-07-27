@@ -283,7 +283,12 @@
     <select id="agType">
       <option value="claude">Claude (Claude Code CLI)</option>
       <option value="codex">Codex (GPT-5, ChatGPT app)</option>
+      <option value="goose">Goose (your configured provider)</option>
     </select>
+    <div id="gooseRow" style="display:none">
+      <label>MODEL <span style="text-transform:none;letter-spacing:0">(optional — blank uses your goose default)</span></label>
+      <input id="agGooseModel" placeholder="e.g. ollama/qwen3-coder-next:Q8_0" maxlength="60">
+    </div>
     <div id="modelRow">
       <label>CLAUDE MODEL</label>
       <select id="agModel">
@@ -809,12 +814,18 @@ document.getElementById('connectBtn').onclick = () => { overlay.hidden = false; 
 document.getElementById('agCancel').onclick = () => { overlay.hidden = true; };
 overlay.onclick = e => { if (e.target === overlay) overlay.hidden = true; };
 document.getElementById('agType').onchange = e => {
-  document.getElementById('modelRow').style.display = e.target.value === 'claude' ? '' : 'none';
+  const t = e.target.value;
+  document.getElementById('modelRow').style.display = t === 'claude' ? '' : 'none';
+  // Goose is already pointed at a provider by your own goose config, so the model
+  // is optional here and free-form (e.g. "tanzu_ai/gemma-4-31B", "ollama/qwen3").
+  document.getElementById('gooseRow').style.display = t === 'goose' ? '' : 'none';
 };
 document.getElementById('agConnect').onclick = async () => {
   const name = document.getElementById('agName').value.trim();
   const type = document.getElementById('agType').value;
-  const modelFlag = document.getElementById('agModel').value;
+  const modelFlag = type === 'goose'
+    ? document.getElementById('agGooseModel').value.trim()
+    : document.getElementById('agModel').value;
   if (!name) return alert('Give the agent a name');
   // Re-using the name of an agent you already own adds that same agent to this
   // project rather than creating a duplicate.

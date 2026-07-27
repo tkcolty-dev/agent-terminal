@@ -62,6 +62,12 @@ const SKILLS_DIR = (() => {
 // lookup: the npm-installed shim is frequently broken (ENOENT on its vendored
 // binary), so resolving via PATH would silently kill every Codex turn.
 const CODEX_BIN = process.env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/Resources/codex';
+// Goose (block/goose). Whatever provider you've configured it against — Tanzu,
+// Ollama, anything — the room just spawns it and inherits that setup. Note that
+// Goose resolves provider credentials through a keyring that a non-interactive
+// child cannot reach, so export the key alongside the server:
+//   TANZU_AI_API_KEY=… node server.js
+const GOOSE_BIN = process.env.GOOSE_BIN || 'goose';
 const MAX_AUTO_TURNS = 3;      // agent-to-agent turns allowed per user message (keep chatter cheap)
 const ROTATE_WORKER_TURNS = 6; // fresh CLI session after this many turns (bounds context growth)
 const ROTATE_LEAD_TURNS = 10;
@@ -579,6 +585,67 @@ class CodexAgent extends AgentRunner {
   }
 }
 
+// Goose speaks the same streaming-JSON idea as Claude Code, so this is mostly a
+// different event vocabulary. Two real differences:
+//  - sessions are named by US rather than assigned by the CLI, so resuming needs
+//    no id to be parsed out — but a rotation must pick a NEW name, or --resume
+//    would drag the old context back in and defeat the rotation.
+//  - it prints an ASCII banner to stdout before any JSON; spawnTurn already
+//    ignores lines that don't start with '{'.
+class GooseAgent extends AgentRunner {
+  command() {
+    // rotation counter in the name: shouldRotateSession() clears sessionId, and a
+    // fresh name is what actually gives us a fresh context
+    if (!this.sessionId) this.gooseRun = (this.gooseRun || 0) + 1;
+    const name = `at-${this.room.id}-${this.id}-${this.gooseRun || 1}`;
+    const args = ['run', '--output-format', 'stream-json', '-i', '-', '--name', name];
+    if (this.sessionId) args.push('--resume');
+    else this.sessionId = name; // first turn creates it; later turns resume it
+    const model = this.turnModelOverride || this.modelFlag;
+    if (model) args.push('--model', model);
+    return { cmd: GOOSE_BIN, args };
+  }
+
+  handleEvent(ev, texts) {
+    if (ev.type === 'message' && ev.message) {
+      for (const block of ev.message.content || []) {
+        if (block.type === 'toolRequest') {
+          const call = block.toolCall?.value || {};
+          this.setStatus('working');
+          this.activity(describeGooseTool(call, this));
+        } else if (block.type === 'text' && ev.message.role === 'assistant' && block.text) {
+          texts.push(block.text);
+        }
+      }
+    } else if (ev.type === 'complete') {
+      // total_tokens is null on providers that don't report usage (e.g. Ollama),
+      // so the meters stay at zero rather than showing an invented number.
+      const t = ev.total_tokens || 0;
+      this.tokens.in += t;
+      this.sessionCtx = t;
+      return texts.length ? texts.join('\n\n') : '';
+    }
+    return null;
+  }
+}
+
+function describeGooseTool(call, agent) {
+  const a = call.arguments || {};
+  const f = p => p ? path.basename(String(p)) : '';
+  switch (call.name) {
+    case 'write': case 'text_editor':
+      agent.stats.files++; agent.touchFile(f(a.path));
+      return `✏️ writing ${f(a.path)}`;
+    case 'shell':
+      agent.stats.cmds++;
+      return `$ ${String(a.command || '').slice(0, 80)}`;
+    case 'read':
+      return `👁 reading ${f(a.path)}`;
+    default:
+      return `⚙ ${call.name || 'tool'}`;
+  }
+}
+
 // ---- ROSTER: persisted in agents.json, editable live from the UI.
 const AGENTS_FILE = path.join(DATA_HOME, 'agents.json');
 // Lean default duo — connect more agents anytime via the + connect agent dialog.
@@ -622,7 +689,7 @@ function checkLimitWarnings(agent) {
 }
 
 function buildAgent(room, def) {
-  const Cls = def.type === 'codex' ? CodexAgent : ClaudeAgent;
+  const Cls = def.type === 'codex' ? CodexAgent : def.type === 'goose' ? GooseAgent : ClaudeAgent;
   return new Cls(room, { ...def });
 }
 // agents.json is a CATALOGUE of engines you own; each room picks its own line-up
@@ -1211,7 +1278,7 @@ ${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => 
         usage: roomUsage(r),
         agents: r.agents.map(a => ({
           id: a.id, name: a.name, color: a.color, model: a.model, status: a.status,
-          type: a instanceof CodexAgent ? 'codex' : 'claude',
+          type: a instanceof CodexAgent ? 'codex' : a instanceof GooseAgent ? 'goose' : 'claude',
           tokens: a.tokens, stats: a.stats,
         })),
       })),
@@ -1360,7 +1427,7 @@ ${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => 
     const room = existingRoom(project);
     if (!room) { res.writeHead(404); res.end('{"error":"no such project"}'); return; }
     const id = slug(name);
-    if (!id || !['claude', 'codex'].includes(type)) { res.writeHead(400); res.end('{"error":"bad agent"}'); return; }
+    if (!id || !['claude', 'codex', 'goose'].includes(type)) { res.writeHead(400); res.end('{"error":"bad agent"}'); return; }
     // Re-using a catalogue name is now how you invite an engine you already own into
     // another project, so it is a success case rather than a 409.
     const existing = agentDefs.find(d => d.id === id);
@@ -1374,10 +1441,12 @@ ${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => 
     if (role === 'lead' && agentDefs.some(d => d.role === 'lead')) { res.writeHead(409); res.end('{"error":"there is already a lead"}'); return; }
     const def = {
       id, name: name.trim(), color: nextColor(), type,
-      model: type === 'codex' ? 'gpt-5 · codex-cli 0.145' : (modelFlag || 'claude'),
+      model: type === 'codex' ? 'gpt-5 · codex-cli 0.145'
+        : type === 'goose' ? (modelFlag || 'goose')
+        : (modelFlag || 'claude'),
     };
     if (role === 'lead') def.role = 'lead';
-    if (type === 'claude' && modelFlag) def.modelFlag = modelFlag;
+    if (type !== 'codex' && modelFlag) def.modelFlag = modelFlag;
     agentDefs.push(def);
     saveDefs();
     room.addAgent(def); // this project only — not every open room

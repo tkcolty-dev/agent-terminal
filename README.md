@@ -46,6 +46,26 @@ All optional — the defaults are the safe local setup.
 | `AGENT_TERMINAL_HOST` | `127.0.0.1` | Interface to bind. |
 | `AGENT_TERMINAL_TOKEN` | *(unset)* | Shared secret. **Required** for any non-loopback host. |
 | `CODEX_BIN` | ChatGPT.app's `codex` | Path to the Codex binary. |
+| `GOOSE_BIN` | `goose` | Path to the Goose binary. |
+
+### Engines
+
+| engine | what it runs on |
+|--------|-----------------|
+| **Claude** | Claude Code CLI, your Anthropic plan |
+| **Codex** | GPT-5 via the ChatGPT app's `codex` |
+| **Goose** | whatever provider *your* Goose config points at — Ollama, a hosted endpoint, anything |
+
+Goose is the easy way to bring local or self-hosted models into a room: configure
+it once with `goose configure`, and the room just spawns it. Leave the model field
+blank to use your Goose default, or set it explicitly (`ollama/qwen3-coder:30b`).
+
+> Goose reads provider credentials from a keyring that a non-interactive child
+> process can't reach, so export the key alongside the server or you'll get a
+> misleading "no provider configured":
+> ```bash
+> TANZU_AI_API_KEY=… node server.js
+> ```
 
 ### Your rooms live outside the checkout
 

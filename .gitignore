@@ -1,3 +1,6 @@
 .playwright-mcp/
 nohup.out
 .trash/
+# per-room symlink to the operator's shared skill library — a machine-specific
+# absolute path, so it must never be committed
+projects/*/workspace/.claude/

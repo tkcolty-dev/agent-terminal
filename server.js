@@ -29,6 +29,21 @@ if (!LOOPBACK && !TOKEN) {
 
 const ROOT = __dirname;
 const PROJECTS_DIR = path.join(ROOT, 'projects');
+// Optional shared skill library (SKILL.md folders). Point this at a directory and
+// every room links it in, so agents in a room can use the same curated skills you
+// use everywhere else. Off unless set: skill *descriptions* load on every turn, so
+// enabling it is a real (small) cost decision rather than a free win.
+//   AGENT_TERMINAL_SKILLS=~/.claude/skills node server.js
+const SKILLS_DIR = (() => {
+  const p = process.env.AGENT_TERMINAL_SKILLS;
+  if (!p) return null;
+  const abs = path.resolve(p.replace(/^~(?=$|\/)/, process.env.HOME || '~'));
+  if (!fs.existsSync(abs)) {
+    console.warn(`⚠ AGENT_TERMINAL_SKILLS=${p} does not exist — shared skills disabled`);
+    return null;
+  }
+  return abs;
+})();
 // Codex ships inside ChatGPT.app. This is deliberately NOT a bare `codex` PATH
 // lookup: the npm-installed shim is frequently broken (ENOENT on its vendored
 // binary), so resolving via PATH would silently kill every Codex turn.
@@ -407,8 +422,14 @@ class ClaudeAgent extends AgentRunner {
       // tag-scoped power: [trivial] turns can only read/edit — no shell, no new files
       const base = caps.trivial ? 'Read,Edit'
         : this.role === 'lead' ? 'Read,Edit,Write' : 'Bash,Read,Edit,Write';
-      const tools = caps.web ? `${base},WebSearch,WebFetch` : base;
-      args.push('--strict-mcp-config', '--disable-slash-commands', '--tools', tools);
+      let tools = caps.web ? `${base},WebSearch,WebFetch` : base;
+      args.push('--strict-mcp-config');
+      // --disable-slash-commands means "disable all skills", so it can't be set on a
+      // turn that is meant to have them. [trivial] turns stay skill-free either way:
+      // they are one-liners, and skill descriptions are not worth their context.
+      if (SKILLS_DIR && !caps.trivial) tools += ',Skill';
+      else args.push('--disable-slash-commands');
+      args.push('--tools', tools);
     }
     if (caps.roblox) args.push('--mcp-config', MCP_ROBLOX_FILE); // Studio tools only when the room wants them
     const model = this.turnModelOverride || this.modelFlag;
@@ -595,6 +616,28 @@ function isAck(t) { return ACK_RE.test(String(t).trim()); }
 function isGreeting(t) { return GREETING_RE.test(String(t).trim()); }
 function isSmallTalk(t) { return isAck(t) || isGreeting(t); }
 
+// Link the shared skill library into a room's workspace at PROJECT level.
+// It has to be project-level: agents spawn with --setting-sources project, which
+// deliberately ignores the operator's ~/.claude, and that excludes user-level
+// skills along with everything else. A project-level .claude/skills survives it.
+// Conveniently this is also the path Goose and opencode look in, so one link
+// serves every engine once those adapters exist.
+function linkSkills(workspace) {
+  if (!SKILLS_DIR) return;
+  const dir = path.join(workspace, '.claude');
+  const link = path.join(dir, 'skills');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    if (fs.lstatSync(link, { throwIfNoEntry: false })) {
+      if (fs.realpathSync(link) === fs.realpathSync(SKILLS_DIR)) return; // already correct
+      fs.rmSync(link, { recursive: true, force: true });                 // repoint a stale link
+    }
+    fs.symlinkSync(SKILLS_DIR, link, 'dir');
+  } catch (err) {
+    console.warn(`⚠ could not link skills into ${workspace}: ${err.message}`);
+  }
+}
+
 // ---------------------------------------------------------------- rooms
 class Room {
   constructor(id) {
@@ -611,6 +654,7 @@ class Room {
     if (!fs.existsSync(boardFile)) {
       fs.writeFileSync(boardFile, `# Task Board — ${id}\n\n| task | owner | status | files |\n|------|-------|--------|-------|\n`);
     }
+    linkSkills(this.workspace); // no-op unless AGENT_TERMINAL_SKILLS is set
     this.messages = [];
     this.clients = new Set();
     const saved = this.readState();

@@ -25,7 +25,7 @@ const INBOX_MAX_CHARS = 6000;  // …capped at this many chars
 const CHEAP_MODEL = 'claude-haiku-4-5-20251001'; // [trivial]-tagged tasks route here
 const KEEPWARM_MS = 4.5 * 60 * 1000;  // ping resumed sessions just under the 5-min cache TTL
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
-const BRIEF_V = 10;            // bump to re-send the room briefing to existing agents
+const BRIEF_V = 11;            // bump to re-send the room briefing to existing agents
 
 // ---------------------------------------------------------------- migration
 // v1 kept a single ./workspace + ./state.json — fold it into projects/drum-machine
@@ -126,6 +126,8 @@ RULES OF THE ROOM:
 
 YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
 - USER COMMANDS ARE LAW. Do EXACTLY what the user asked — nothing more, nothing less. NEVER invent a project or pick a direction the user didn't give. If the request is ambiguous, ask the user ONE short clarifying question and assign NOTHING until they answer.
+- The user often types by voice — if a message reads garbled or contradictory, confirm your reading in ONE short question BEFORE spending worker turns. A cheap question beats an expensive wrong build.
+- ACCEPTANCE CHECKS: every [normal]/[hard] assignment must end with "CHECK: <how to verify it worked>". A task is not done until its checks are reported PASS with evidence.
 - When the user gives an order, relay it to workers IMMEDIATELY in your first reply (@mention + concrete task). Don't sit on instructions.
 - If the user says stop/pause/hold/wait in any form: assign nothing, tell workers to stand down, confirm in one line.
 - The user's messages come to YOU. You own the plan, the TASKBOARD.md, and the final report.
@@ -144,7 +146,8 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
 - THE FINISH LINE: when the user's request is fully done and verified, your final message MUST start with exactly "✅ DONE — " followed by a one-line summary. This triggers the big completion banner the user watches for. Never use that prefix before everything is truly done.
 - Be extremely token-frugal: short assignments, short reports, no filler.` :
    `
-19. CHAIN OF COMMAND: this room has a LEAD agent who plans and assigns. You wake when the lead @mentions you with a task. Do the task fully, then reply once with results (the lead sees it automatically). Don't grab new scope the lead didn't assign — [SKIP] anything that isn't yours. EXCEPTION: if the USER @mentions you directly, that is a direct order — obey it exactly and immediately, it outranks the lead.`);
+19. CHAIN OF COMMAND: this room has a LEAD agent who plans and assigns. You wake when the lead @mentions you with a task. Do the task fully, then reply once with results (the lead sees it automatically). Don't grab new scope the lead didn't assign — [SKIP] anything that isn't yours. EXCEPTION: if the USER @mentions you directly, that is a direct order — obey it exactly and immediately, it outranks the lead.
+20. VERIFICATION CONTRACT: if your assignment has "CHECK:" lines, run each one and report PASS or FAIL per check with one line of evidence (command output, file content, or screenshot name). Never claim done with a failing or unrun check.`);
   }
 
   unseen() {
@@ -177,6 +180,8 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       prompt += (this.briefedV ? '(Updated room briefing — rules have changed:)\n\n' : '') + this.briefing() + '\n\n';
       this.briefedV = BRIEF_V;
     }
+    // cache-safe ordering: stable stuff first, volatile status LAST
+    prompt += `--- NEW MESSAGES IN THE ROOM ---\n${transcript}\n--- END ---\n\n`;
     if (this.room.robloxMode) {
       prompt += `NOTE: 🎮 ROBLOX MODE is ON for this room. Claude-family agents have Roblox Studio MCP tools (get_file_tree, create_object, set_script_source, execute_luau, start_playtest, capture_screenshot, …) — Roblox Studio must be open with the MCP plugin for them to respond. Codex has no Studio access: Codex writes Luau/logic into workspace files, Claude-family agents apply and test them in Studio. Verify changes with playtest output or a Studio screenshot saved to the workspace.\n\n`;
     }
@@ -186,7 +191,7 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
         `${a.name} is mid-turn${a.currentEdits.size ? `, editing: ${[...a.currentEdits].join(', ')} — do NOT touch these files` : ''}`
       ).join('\n') + `\n--- END LIVE ---\n\n`;
     }
-    prompt += `--- NEW MESSAGES IN THE ROOM ---\n${transcript}\n--- END ---\n\nDo any real work needed (files/commands in the shared workspace), then post your short reply to the room.`;
+    prompt += `Do any real work needed (files/commands in the shared workspace), then post your short reply to the room.`;
     return prompt;
   }
 
@@ -213,6 +218,7 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       web: /\[web\]|web.search|research\b|look up|latest docs/.test(t),
       roblox: this.room.robloxMode,
       trivial: /\[trivial\]/.test(t),
+      hard: /\[hard\]/.test(t),
     };
   }
 
@@ -220,6 +226,7 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
     this.busy = true;
     this.setStatus('thinking');
     const t0 = Date.now();
+    const beforeTok = { ...this.tokens };
     this.stats.turns++;
     this.stats.lastActive = t0;
     this.currentEdits = new Set();
@@ -251,6 +258,18 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
     } finally {
       this.stats.ms += Date.now() - t0;
       this.stats.lastActive = Date.now();
+      // per-turn cost telemetry (the agents asked for this themselves)
+      const d = {
+        in: this.tokens.in - beforeTok.in,
+        cached: (this.tokens.cached || 0) - (beforeTok.cached || 0),
+        out: this.tokens.out - beforeTok.out,
+        cost: this.tokens.cost - beforeTok.cost,
+      };
+      if (d.in || d.cached || d.out) {
+        const secs = Math.round((Date.now() - t0) / 1000);
+        this.activity(`📊 ${kfmtSrv(d.in)} fresh · ${kfmtSrv(d.cached)} cached ${d.cached > d.in ? '(hit)' : '(cold)'}` +
+          `${d.cost > 0 ? ' · $' + d.cost.toFixed(3) : ''} · ${secs}s${this.turnModelOverride ? ' · routed→haiku' : ''}`);
+      }
       this.busy = false;
       this.currentEdits = new Set();
       this.setStatus('idle');
@@ -331,9 +350,11 @@ let lastRateLimit = null; // latest Claude plan window info seen from any agent
 
 class ClaudeAgent extends AgentRunner {
   command() {
-    const args = ['-p', '--output-format', 'stream-json', '--verbose',
-      '--dangerously-skip-permissions', '--max-turns', '12'];
     const caps = this.capabilities || {};
+    // tag-enforced turn budgets: [trivial] gets 4 tool-steps, [hard] gets 24, default 12
+    const maxTurns = caps.trivial ? '4' : caps.hard ? '24' : '12';
+    const args = ['-p', '--output-format', 'stream-json', '--verbose',
+      '--dangerously-skip-permissions', '--max-turns', maxTurns];
     if (caps.browser) {
       // full default surface (Playwright plugin etc.) — only for tagged browser-test turns
     } else {

@@ -14,3 +14,6 @@
 | Implement round 2 | — | awaiting user OK | ../../../server.js |
 | Breakout game (paused by user) | Codex/— | on hold | game.js |
 | Harness feedback (Codex seat) | Codex | done | FEEDBACK-codex.md |
+| Harness feedback (lead seat) | Boss | done | FEEDBACK-harness.md |
+| Harness feedback (browser seat) | Claudious | done | FEEDBACK-claudious.md |
+| Merged feedback summary | Boss | done | FEEDBACK-SUMMARY.md |

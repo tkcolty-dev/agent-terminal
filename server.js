@@ -9,12 +9,30 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const PORT = 4600;
+// Loopback by default: every /send spawns a CLI with --dangerously-skip-permissions
+// against files on this disk, and there is no per-user login. Exposing that to a
+// network needs a deliberate opt-in AND a shared secret (enforced below).
+const HOST = process.env.AGENT_TERMINAL_HOST || '127.0.0.1';
+const TOKEN = process.env.AGENT_TERMINAL_TOKEN || '';
+const LOOPBACK = HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1';
+if (!LOOPBACK && !TOKEN) {
+  console.error(`refusing to bind ${HOST} without AGENT_TERMINAL_TOKEN set.\n` +
+    `Anyone who can reach this port can run code on this machine. Either drop\n` +
+    `AGENT_TERMINAL_HOST (loopback only) or set a long random token:\n` +
+    `  AGENT_TERMINAL_TOKEN=$(openssl rand -hex 24) AGENT_TERMINAL_HOST=0.0.0.0 node server.js`);
+  process.exit(1);
+}
+
 const ROOT = __dirname;
 const PROJECTS_DIR = path.join(ROOT, 'projects');
-const CODEX_BIN = '/Applications/ChatGPT.app/Contents/Resources/codex';
+// Codex ships inside ChatGPT.app. This is deliberately NOT a bare `codex` PATH
+// lookup: the npm-installed shim is frequently broken (ENOENT on its vendored
+// binary), so resolving via PATH would silently kill every Codex turn.
+const CODEX_BIN = process.env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/Resources/codex';
 const MAX_AUTO_TURNS = 3;      // agent-to-agent turns allowed per user message (keep chatter cheap)
 const ROTATE_WORKER_TURNS = 6; // fresh CLI session after this many turns (bounds context growth)
 const ROTATE_LEAD_TURNS = 10;
@@ -25,7 +43,8 @@ const INBOX_MAX_CHARS = 6000;  // …capped at this many chars
 const CHEAP_MODEL = 'claude-haiku-4-5-20251001'; // [trivial]-tagged tasks route here
 const KEEPWARM_MS = 4.5 * 60 * 1000;  // ping resumed sessions just under the 5-min cache TTL
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
-const BRIEF_V = 10;            // bump to re-send the room briefing to existing agents
+const BRIEF_V = 11;            // bump to re-send the room briefing to existing agents
+const HISTORY_REPLAY = 200;    // messages a connecting client gets (older stay on disk)
 
 // ---------------------------------------------------------------- migration
 // v1 kept a single ./workspace + ./state.json — fold it into projects/drum-machine
@@ -107,7 +126,7 @@ RULES OF THE ROOM:
 8. Disagreements: settle fast, pick the simplest path, keep momentum.
 9. SEE AND TEST YOUR WORK — never declare something done without testing it:
    - The live preview is http://localhost:${PORT}/preview/${this.room.id}/ .
-   - Claude-family agents: you have real browser tools (Playwright MCP) — load the preview, click through it, check the console, and SAVE SCREENSHOTS as .png files in the workspace. Every image saved there is automatically shown to the user and teammates in the chat.
+   - Claude-family agents: you get real browser tools ONLY on a turn whose task is tagged [browser]. On such a turn, load the preview, click through it, check the console, and SAVE SCREENSHOTS as .png files in the workspace — every image saved there is automatically shown to the user and teammates in the chat. On any other turn you have no browser: do not promise a screenshot you cannot take; say what you verified by reading code and ask for a [browser] turn if a visual check matters.
    - Codex: verify with real commands — curl the preview URL, run node scripts against your code, syntax-check. For visual checks, ask a Claude teammate to browser-test and screenshot.
 10. WEB SEARCH: you can search the live web (Claude-family: WebSearch/WebFetch tools; Codex: native web_search). Use it for docs, APIs, assets, and ideas instead of guessing.
 11. YOUR PRIVATE MEMORY: the file .notes/${this.name}.md in the workspace is YOURS alone — plans, learnings, todos, gotchas. Read it when you start a task, update it as you work. MEMORY.md stays for team-wide facts.
@@ -141,7 +160,8 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
 - Size every task so a worker can FINISH IT IN ONE TURN. Bigger jobs = several short rounds.
 - Assign both workers in ONE message when tasks are independent, so they run in parallel.
 - NEVER GO SILENT: after every worker report you MUST reply with either (a) the next one-line assignment(s), or (b) the finish line. The user must never wonder what's happening.
-- THE FINISH LINE: when the user's request is fully done and verified, your final message MUST start with exactly "✅ DONE — " followed by a one-line summary. This triggers the big completion banner the user watches for. Never use that prefix before everything is truly done.
+- YOU HAVE NO BROWSER AND NO SHELL. You can only read and write files. NEVER promise to browser-test, screenshot, curl or run anything yourself — delegate it: "@Worker → [browser] verify X and save shot.png". Assign visual checks; never claim them.
+- THE FINISH LINE: when the user's request is fully done and verified, end with a line that starts with exactly "✅ DONE — " followed by a one-line summary. Put it on its own line. This triggers the big completion banner the user watches for. Never use it before everything is truly done.
 - Be extremely token-frugal: short assignments, short reports, no filler.` :
    `
 19. CHAIN OF COMMAND: this room has a LEAD agent who plans and assigns. You wake when the lead @mentions you with a task. Do the task fully, then reply once with results (the lead sees it automatically). Don't grab new scope the lead didn't assign — [SKIP] anything that isn't yours. EXCEPTION: if the USER @mentions you directly, that is a direct order — obey it exactly and immediately, it outranks the lead.`);
@@ -153,7 +173,10 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
 
   buildPrompt() {
     const all = this.room.messages.slice(this.seenUpTo);
-    this.seenUpTo = this.room.messages.length;
+    // Staged, NOT committed: if the CLI times out or crashes we must redeliver these
+    // on the next wake. Committing here silently ate the instruction the agent was
+    // woken for. runTurn() advances seenUpTo only after a turn actually succeeds.
+    this.pendingSeenUpTo = this.room.messages.length;
     // inbox filter (token diet): drop system chatter, [IDLE] sign-offs, and
     // messages @aimed at other agents; keep only the last few, char-capped
     const relevant = all.filter(m => {
@@ -242,12 +265,14 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
     const prompt = this.buildPrompt();
     try {
       const reply = await this.spawnTurn(prompt);
+      this.seenUpTo = this.pendingSeenUpTo; // commit: the agent really did read these
       const text = (reply || '').trim();
       // [SKIP] = agent explicitly had nothing to say — post nothing, wake nobody
       if (text && !text.toUpperCase().startsWith('[SKIP]')) this.room.post(this.id, this.name, text);
       else this.activity('⏭ turn ended with nothing to post'); // visible, so silence is never a mystery
     } catch (err) {
-      this.room.sys(`⚠ ${this.name} turn failed: ${String(err).slice(0, 300)}`);
+      // seenUpTo stays put, so the messages this turn was meant to handle come back
+      this.room.sys(`⚠ ${this.name} turn failed (will retry these messages): ${String(err).slice(0, 300)}`);
     } finally {
       this.stats.ms += Date.now() - t0;
       this.stats.lastActive = Date.now();
@@ -331,11 +356,20 @@ let lastRateLimit = null; // latest Claude plan window info seen from any agent
 
 class ClaudeAgent extends AgentRunner {
   command() {
+    // --setting-sources project: load THIS project's settings, never the operator's
+    // ~/.claude. Without it every agent inherits the operator's personal CLAUDE.md,
+    // hooks and plugins — leaking private notes into the room, bleeding a foreign
+    // output style into chat, and paying for all of it on every single turn.
+    // Measured cold-start context: lean 10,109 -> 5,970; browser 31,357 -> 20,919.
+    // OAuth/plan billing is preserved (unlike --bare, which forces an API key).
     const args = ['-p', '--output-format', 'stream-json', '--verbose',
-      '--dangerously-skip-permissions', '--max-turns', '12'];
+      '--dangerously-skip-permissions', '--max-turns', '12',
+      '--setting-sources', 'project'];
     const caps = this.capabilities || {};
     if (caps.browser) {
-      // full default surface (Playwright plugin etc.) — only for tagged browser-test turns
+      // ADDITIVE, not a bypass: browser turns keep the config isolation above and
+      // only give up --strict-mcp-config so the browser MCP can resolve. They do
+      // NOT re-enable the operator's whole plugin/skill surface.
     } else {
       // LEAN PROFILE (measured -71.6% cold-start): core tools only, no plugins/skills/MCP
       const base = this.role === 'lead' ? 'Read,Edit,Write' : 'Bash,Read,Edit,Write';
@@ -451,9 +485,12 @@ class CodexAgent extends AgentRunner {
 
 // ---- ROSTER: persisted in agents.json, editable live from the UI.
 const AGENTS_FILE = path.join(ROOT, 'agents.json');
-// Lean default duo — connect more agents anytime via the + connect agent dialog
+// Lean default duo — connect more agents anytime via the + connect agent dialog.
+// Claude leads by default: in a leaderless room every message wakes EVERY agent, so
+// cost scales with roster size whether or not there is work to do. With a lead, the
+// user talks to one agent and it fans work out via @mentions.
 const DEFAULT_DEFS = [
-  { id: 'claude', name: 'Claude', color: '#ff9668', type: 'claude', model: 'claude (loading…)' },
+  { id: 'claude', name: 'Claude', color: '#ff9668', type: 'claude', model: 'claude (loading…)', role: 'lead' },
   { id: 'codex', name: 'Codex', color: '#58c4dc', type: 'codex', model: 'gpt-5 · codex-cli 0.145' },
 ];
 let agentDefs;
@@ -492,11 +529,37 @@ function buildAgent(room, def) {
   const Cls = def.type === 'codex' ? CodexAgent : ClaudeAgent;
   return new Cls(room, { ...def });
 }
+// agents.json is a CATALOGUE of engines you own; each room picks its own line-up
+// from it (room.members). Previously the roster was global, so connecting one agent
+// posted a join notice into every project at once — the space-shooter room's entire
+// history was twelve such notices from projects nobody was looking at.
 function makeAgents(room) {
-  return agentDefs.map(def => buildAgent(room, def));
+  return agentDefs.filter(def => room.members.includes(def.id)).map(def => buildAgent(room, def));
 }
 
 function saidIdle(t) { return /\[IDLE\]\s*$/i.test(t.trim()); }
+
+// The finish line is matched on ANY line, not just the first. The briefing asks the
+// lead to open its final message with "✅ DONE — …", but in practice it reports its
+// review first and signs off at the bottom. Anchoring to the start of the message
+// meant a completed task neither fired the banner nor satisfied deadAirCheck, so the
+// user was told the room had stalled at the exact moment it had finished.
+const DONE_RE = /^\s*✅\s*DONE\b.*/im;
+function saidDone(t) { return DONE_RE.test(String(t)); }
+function doneLine(t) {
+  const m = DONE_RE.exec(String(t));
+  return (m ? m[0] : String(t)).trim().replace(/\[IDLE\]\s*$/i, '').trim().slice(0, 200);
+}
+
+// Small talk carries no work, so it must never cost a model turn. Without the
+// greeting half of this, a bare "hi" woke every agent in the room: each one burned
+// a full frontier turn introducing itself, then several more telling each other
+// they had nothing to do. The server answers greetings itself instead (see /send).
+const ACK_RE = /^(ok(ay)?|k|thanks?( you)?|ty|nice( one)?|good( job| work)?|got it|cool|great|perfect|awesome|👍|sounds good)[.!? 🙂👍]*$/i;
+const GREETING_RE = /^(hi+|hey+|hello+|yo|sup|hiya|howdy|greetings|g'?day|(good )?(morning|afternoon|evening)|gm|test(ing)?|ping|you there|anyone (there|home))[.!? 🙂👋]*$/i;
+function isAck(t) { return ACK_RE.test(String(t).trim()); }
+function isGreeting(t) { return GREETING_RE.test(String(t).trim()); }
+function isSmallTalk(t) { return isAck(t) || isGreeting(t); }
 
 // ---------------------------------------------------------------- rooms
 class Room {
@@ -516,6 +579,12 @@ class Room {
     }
     this.messages = [];
     this.clients = new Set();
+    const saved = this.readState();
+    // Rooms saved before per-room membership existed have no `members` key — those
+    // keep the whole catalogue so nobody's line-up changes under them on upgrade.
+    this.members = Array.isArray(saved && saved.members)
+      ? saved.members.filter(id => agentDefs.some(d => d.id === id))
+      : agentDefs.map(d => d.id);
     this.agents = makeAgents(this);
     this.autoTurns = 0;
     this.running = true;
@@ -526,12 +595,29 @@ class Room {
     this.saveTimer = null;
     this.imgPrev = new Map();   // image sizes last tick (write-stability check)
     this.imgPosted = null;      // image sizes already posted to chat (null = not baselined)
-    this.loadState();
+    this.loadState(saved);
   }
 
-  loadState() {
+  // Raw read, separated from apply so the constructor can learn `members` before it
+  // builds the agents. A corrupt file is preserved and reported rather than swallowed:
+  // the old bare `catch {}` made "state.json is truncated" and "brand new project"
+  // look identical, so a room could silently lose its entire history.
+  readState() {
+    let raw;
+    try { raw = fs.readFileSync(this.stateFile, 'utf8'); }
+    catch { return null; } // genuinely new room
+    try { return JSON.parse(raw); }
+    catch (err) {
+      const bak = `${this.stateFile}.corrupt-${Date.now()}`;
+      try { fs.writeFileSync(bak, raw); } catch {}
+      console.error(`[${this.id}] state.json unreadable (${err.message}). Kept a copy at ${path.basename(bak)}; starting this room empty.`);
+      return null;
+    }
+  }
+
+  loadState(s) {
     try {
-      const s = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
+      if (!s) return;
       this.messages.push(...(s.messages || []));
       if (s.talkMode) this.talkMode = s.talkMode;
       this.robloxMode = !!s.robloxMode;
@@ -559,6 +645,7 @@ class Room {
       const state = {
         talkMode: this.talkMode,
         robloxMode: this.robloxMode,
+        members: this.members,
         messages: this.messages,
         agents: this.agents.map(a => ({
           id: a.id, sessionId: a.sessionId, briefedV: a.briefedV || 0, seenUpTo: a.seenUpTo,
@@ -566,7 +653,16 @@ class Room {
           sessionCtx: a.sessionCtx || 0, sessionLastActive: a.sessionLastActive || 0, sessionProfile: a.sessionProfile || null,
         })),
       };
-      fs.writeFile(this.stateFile, JSON.stringify(state), () => {});
+      // Atomic: a crash partway through a plain writeFile leaves a truncated
+      // state.json, which used to read back as an empty room. Write beside it,
+      // then rename — rename is atomic on POSIX, so readers see old or new, never half.
+      const tmp = `${this.stateFile}.tmp`;
+      fs.writeFile(tmp, JSON.stringify(state), err => {
+        if (err) return console.error(`[${this.id}] state write failed: ${err.message}`);
+        fs.rename(tmp, this.stateFile, e => {
+          if (e) console.error(`[${this.id}] state rename failed: ${e.message}`);
+        });
+      });
     }, 300);
   }
 
@@ -582,8 +678,8 @@ class Room {
     this.broadcast('msg', m);
     // the lead declaring "✅ DONE" fires the completion banner in the UI
     const lead = this.agents.find(a => a.role === 'lead');
-    if (lead && from === lead.id && /^✅\s*DONE/i.test(text.trim())) {
-      this.broadcast('done', { text: text.trim().slice(0, 200) });
+    if (lead && from === lead.id && saidDone(text)) {
+      this.broadcast('done', { text: doneLine(text) });
     }
     this.saveState();
     return m;
@@ -609,7 +705,7 @@ class Room {
     const lead = this.agents.find(a => a.role === 'lead');
     if (!lead || last.from !== lead.id) return;
     if (this.mentionTargets(last.text).size) return;          // it assigned someone
-    if (/^✅\s*DONE/i.test(last.text.trim())) return;          // it finished
+    if (saidDone(last.text)) return;                          // it finished
     if (last.text.includes('?')) return;                       // it asked the user something
     if (this._deadAirAt === last.n) return;                     // already hinted for this message
     this._deadAirAt = last.n;
@@ -645,8 +741,8 @@ class Room {
   // with a lead in the room: user+worker messages go to the lead, lead assigns via @mentions)
   wakes(m, agent) {
     if (m.from === 'system' || m.from === agent.id) return false;
-    // ack-gate: pure acknowledgments never wake a model — zero tokens
-    if (/^(ok(ay)?|k|thanks?( you)?|nice( one)?|good( job| work)?|got it|cool|great|perfect|👍|sounds good)[.! 🙂👍]*$/i.test(m.text.trim())) return false;
+    // small-talk gate: acks and greetings never wake a model — zero tokens
+    if (isSmallTalk(m.text)) return false;
     const targets = this.mentionTargets(m.text);
     if (targets.size) return targets.has(agent.id); // routed: only mentioned agents wake
     const lead = this.agents.find(a => a.role === 'lead');
@@ -681,11 +777,17 @@ class Room {
       }
       agent.limitNotified = false;
       const userWake = wakers.some(m => m.from === 'user');
-      if (!userWake) {
+      // The lead is exempt from the chatter cap. It only ever wakes to review worker
+      // reports and then either assign the next step or post "✅ DONE". Counting its
+      // turns meant a single round (lead + 2 workers = 3) hit the cap exactly when the
+      // lead was due to close the loop, so the finish line and its banner never fired
+      // — and workers filled the silence by inventing unassigned scope.
+      const exempt = userWake || agent.role === 'lead';
+      if (!exempt) {
         if (this.autoTurns >= MAX_AUTO_TURNS) {
           if (!this.capNoticeShown) {
             this.capNoticeShown = true;
-            this.sys(`⏸ auto-chat paused after ${MAX_AUTO_TURNS} agent turns — send a message to keep them going.`);
+            this.sys(`⏸ auto-chat paused after ${MAX_AUTO_TURNS} worker turns — send a message to keep them going.`);
           }
           continue;
         }
@@ -722,11 +824,13 @@ class Room {
   }
 
   addAgent(def) {
+    if (this.agents.some(x => x.id === def.id)) return; // already in this room
     const a = buildAgent(this, def);
     a.seenUpTo = this.messages.length; // don't react to old history
     this.agents.push(a);
+    if (!this.members.includes(def.id)) this.members.push(def.id);
     this.broadcast('agents', { agents: this.agentList() });
-    this.sys(`🔌 ${def.name} connected to the room`);
+    this.sys(`🔌 ${def.name} joined this project`);
     this.saveState();
   }
 
@@ -735,8 +839,9 @@ class Room {
     if (!a) return;
     a.kill();
     this.agents = this.agents.filter(x => x !== a);
+    this.members = this.members.filter(x => x !== id);
     this.broadcast('agents', { agents: this.agentList() });
-    this.sys(`🔌 ${a.name} disconnected`);
+    this.sys(`🔌 ${a.name} left this project`);
     this.saveState();
   }
 
@@ -745,7 +850,11 @@ class Room {
       type: 'hello',
       project: this.id,
       projects: listProjects(),
-      messages: this.messages,
+      // Replay a bounded tail, not the whole log. Nothing is deleted — older messages
+      // stay in state.json — but a long-running room shouldn't push an ever-growing
+      // transcript at every reconnect.
+      messages: this.messages.slice(-HISTORY_REPLAY),
+      truncated: Math.max(0, this.messages.length - HISTORY_REPLAY),
       agents: this.agentList(),
       files: this.listTree(),
       claims: this.claimsMap(),
@@ -780,6 +889,28 @@ function listProjects() {
       .filter(e => e.isDirectory() && !closedProjects.includes(e.name))
       .map(e => e.name).sort();
   } catch { return []; }
+}
+
+// Non-creating lookup. getRoom() makes a project directory for whatever name it is
+// handed, which is right for "+ new project" and wrong everywhere else — a typo'd
+// name in an upload URL used to silently conjure a project.
+function existingRoom(id) {
+  id = slug(id);
+  if (!id) return null;
+  if (rooms.has(id)) return rooms.get(id);
+  return listProjects().includes(id) ? getRoom(id) : null;
+}
+
+// Resolve a client-supplied path inside a room's workspace, or null if it escapes.
+// The previous guard was `file.startsWith(room.workspace)` — a string-prefix test,
+// not a path-boundary test. Any sibling directory whose name merely BEGINS with
+// "workspace" shares that prefix, so `../workspace-anything/secret` resolved outside
+// the sandbox and passed the check, for reads and for PUT uploads alike.
+function inWorkspace(room, rel) {
+  const ws = path.resolve(room.workspace);
+  const file = path.resolve(ws, String(rel || '').replace(/^[/\\]+/, ''));
+  if (file !== ws && !file.startsWith(ws + path.sep)) return null;
+  return file;
 }
 
 function shutRoom(id) { // kill turns + drop from memory (files untouched)
@@ -850,6 +981,24 @@ function serveFile(res, file) {
     res.end(data);
   });
 }
+// Auth gate. Inactive on a loopback bind with no token set (the default, unchanged
+// local experience); mandatory for any other bind. Present the token once as
+// ?token=… and it is stored in a cookie, so the SSE stream, uploads, the preview
+// iframe and plain links all keep working without threading it through every URL.
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+function authed(req, res, url) {
+  if (!TOKEN) return true;
+  if (safeEqual(url.searchParams.get('token') || '', TOKEN)) {
+    res.setHeader('Set-Cookie', `at=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax`);
+    return true;
+  }
+  const c = /(?:^|;\s*)at=([^;]+)/.exec(req.headers.cookie || '');
+  return !!c && safeEqual(decodeURIComponent(c[1]), TOKEN);
+}
+
 function readBody(req) {
   return new Promise(resolve => {
     let body = '';
@@ -861,6 +1010,12 @@ function readBody(req) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
+
+  if (!authed(req, res, url)) {
+    res.writeHead(401, { 'Content-Type': 'text/plain' });
+    res.end('unauthorized — open this server once with ?token=<your AGENT_TERMINAL_TOKEN>');
+    return;
+  }
 
   if (p === '/') return serveFile(res, path.join(ROOT, 'public', 'index.html'));
   if (p === '/usage') return serveFile(res, path.join(ROOT, 'public', 'usage.html'));
@@ -899,7 +1054,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/send' && req.method === 'POST') {
     const { text, project } = await readBody(req);
-    const room = getRoom(project);
+    const room = existingRoom(project);
     if (room && text && text.trim()) {
       const cmd = text.trim().toLowerCase().replace(/[!.…\s]+$/, '');
       if (cmd === 'stop' || cmd === 'halt') {
@@ -919,7 +1074,13 @@ const server = http.createServer(async (req, res) => {
         for (const a of room.agents) a.limitNotified = false; // benched agents re-announce so silence is explained
         room.broadcast('paused', { paused: false });
         room.post('user', 'You', text.trim());
-        room.scheduleTurns();
+        if (isSmallTalk(text)) {
+          // Answered here for zero model tokens. scheduleTurns() would wake nobody
+          // anyway — say so, so a friendly "hi" reads as handled rather than ignored.
+          room.sys(isGreeting(text)
+            ? '👋 Room is live and your agents are standing by — tell them what to build.'
+            : '👍 Noted — no agents woken, no tokens spent.');
+        } else room.scheduleTurns();
       }
     }
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}');
@@ -928,7 +1089,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/stop' && req.method === 'POST') {
     const { project } = await readBody(req);
-    const room = getRoom(project);
+    const room = existingRoom(project);
     if (room) {
       room.running = false;
       for (const a of room.agents) a.kill();
@@ -941,7 +1102,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/talkmode' && req.method === 'POST') {
     const { project, mode } = await readBody(req);
-    const room = getRoom(project);
+    const room = existingRoom(project);
     if (room && ['turns', 'parallel'].includes(mode)) {
       room.talkMode = mode;
       room.saveState();
@@ -955,7 +1116,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/roblox' && req.method === 'POST') {
     const { project, on } = await readBody(req);
-    const room = getRoom(project);
+    const room = existingRoom(project);
     if (room) {
       room.robloxMode = !!on;
       room.saveState();
@@ -971,11 +1132,11 @@ const server = http.createServer(async (req, res) => {
   // PUT /upload/<project>/<path> — drop files (game files, photos…) into a workspace
   const um = p.match(/^\/upload\/([^/]+)\/(.+)$/);
   if (um && req.method === 'PUT') {
-    const room = getRoom(um[1]);
+    const room = existingRoom(um[1]);
     if (!room) { res.writeHead(404); res.end('no such project'); return; }
     const rel = decodeURIComponent(um[2]).replace(/^\/+/, '');
-    const file = path.normalize(path.join(room.workspace, rel));
-    if (!file.startsWith(room.workspace)) { res.writeHead(403); res.end(); return; }
+    const file = inWorkspace(room, rel);
+    if (!file) { res.writeHead(403); res.end('outside the workspace'); return; }
     const chunks = []; let size = 0;
     req.on('data', c => { size += c.length; if (size > 200 * 1024 * 1024) { req.destroy(); } else chunks.push(c); });
     req.on('end', () => {
@@ -990,7 +1151,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/pause' && req.method === 'POST') {
     const { project } = await readBody(req);
-    const room = getRoom(project);
+    const room = existingRoom(project);
     if (room && room.running) {
       room.running = false; // in-flight turns finish; no new turns start
       room.sys('⏸ paused — current turns will finish, then everyone holds.');
@@ -1002,7 +1163,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/resume' && req.method === 'POST') {
     const { project } = await readBody(req);
-    const room = getRoom(project);
+    const room = existingRoom(project);
     if (room && !room.running) {
       room.running = true;
       room.sys('▶ resumed.');
@@ -1014,10 +1175,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/agents/add' && req.method === 'POST') {
-    const { name, type, modelFlag, role } = await readBody(req);
+    const { name, type, modelFlag, role, project } = await readBody(req);
+    const room = existingRoom(project);
+    if (!room) { res.writeHead(404); res.end('{"error":"no such project"}'); return; }
     const id = slug(name);
     if (!id || !['claude', 'codex'].includes(type)) { res.writeHead(400); res.end('{"error":"bad agent"}'); return; }
-    if (agentDefs.some(d => d.id === id)) { res.writeHead(409); res.end('{"error":"name taken"}'); return; }
+    // Re-using a catalogue name is now how you invite an engine you already own into
+    // another project, so it is a success case rather than a 409.
+    const existing = agentDefs.find(d => d.id === id);
+    if (existing) {
+      if (room.agents.some(a => a.id === id)) { res.writeHead(409); res.end('{"error":"already in this project"}'); return; }
+      room.addAgent(existing);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, id, reused: true }));
+      return;
+    }
     if (role === 'lead' && agentDefs.some(d => d.role === 'lead')) { res.writeHead(409); res.end('{"error":"there is already a lead"}'); return; }
     const def = {
       id, name: name.trim(), color: nextColor(), type,
@@ -1027,7 +1199,7 @@ const server = http.createServer(async (req, res) => {
     if (type === 'claude' && modelFlag) def.modelFlag = modelFlag;
     agentDefs.push(def);
     saveDefs();
-    for (const room of rooms.values()) room.addAgent(def);
+    room.addAgent(def); // this project only — not every open room
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, id }));
     return;
@@ -1051,11 +1223,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Removing an agent takes it out of ONE project by default. Pass forget:true to
+  // also drop it from the catalogue (and therefore from every project).
   if (p === '/agents/remove' && req.method === 'POST') {
-    const { id } = await readBody(req);
-    agentDefs = agentDefs.filter(d => d.id !== id);
-    saveDefs();
-    for (const room of rooms.values()) room.removeAgent(id);
+    const { id, project, forget } = await readBody(req);
+    if (forget) {
+      agentDefs = agentDefs.filter(d => d.id !== id);
+      saveDefs();
+      for (const room of rooms.values()) room.removeAgent(id);
+    } else {
+      const room = existingRoom(project);
+      if (!room) { res.writeHead(404); res.end('{"error":"no such project"}'); return; }
+      room.removeAgent(id);
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');
     return;
@@ -1111,11 +1291,11 @@ const server = http.createServer(async (req, res) => {
   // /preview/<project>/<path...>
   let m = p.match(/^\/preview\/([^/]+)\/?(.*)$/);
   if (m) {
-    const room = rooms.get(m[1]);
+    const room = existingRoom(m[1]);
     if (!room) { res.writeHead(404); res.end('no such project'); return; }
     const rel = decodeURIComponent(m[2]) || 'index.html';
-    const file = path.normalize(path.join(room.workspace, rel));
-    if (!file.startsWith(room.workspace)) { res.writeHead(403); res.end(); return; }
+    const file = inWorkspace(room, rel);
+    if (!file) { res.writeHead(403); res.end('outside the workspace'); return; }
     if (fs.existsSync(file) && fs.statSync(file).isDirectory()) return serveFile(res, path.join(file, 'index.html'));
     return serveFile(res, file);
   }
@@ -1123,10 +1303,10 @@ const server = http.createServer(async (req, res) => {
   // /file/<project>/<path...> raw viewer
   m = p.match(/^\/file\/([^/]+)\/(.*)$/);
   if (m) {
-    const room = rooms.get(m[1]);
+    const room = existingRoom(m[1]);
     if (!room) { res.writeHead(404); res.end('no such project'); return; }
-    const file = path.normalize(path.join(room.workspace, decodeURIComponent(m[2])));
-    if (!file.startsWith(room.workspace)) { res.writeHead(403); res.end(); return; }
+    const file = inWorkspace(room, decodeURIComponent(m[2]));
+    if (!file) { res.writeHead(403); res.end('outside the workspace'); return; }
     const ext = path.extname(file).toLowerCase();
     if (MIME[ext] && MIME[ext] !== 'text/html') return serveFile(res, file); // images etc. render natively
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -1136,7 +1316,16 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404); res.end('not found');
 });
 
-server.listen(PORT, () => {
-  console.log(`AGENT TERMINAL → http://localhost:${PORT}`);
+// Fail loudly at boot rather than once per turn: a missing Codex binary otherwise
+// surfaces only as every Codex turn dying with a spawn error inside the chat log.
+if (agentDefs.some(d => d.type === 'codex') && !fs.existsSync(CODEX_BIN)) {
+  console.warn(`⚠ Codex binary not found at ${CODEX_BIN}\n` +
+    `  Codex agents will fail every turn. Install the ChatGPT desktop app, or set CODEX_BIN.\n` +
+    `  (Note: the 'codex' on PATH is often a broken npm shim — prefer the app's binary.)`);
+}
+
+server.listen(PORT, HOST, () => {
+  console.log(`AGENT TERMINAL → http://${LOOPBACK ? 'localhost' : HOST}:${PORT}${TOKEN ? '/?token=…' : ''}`);
+  if (!LOOPBACK) console.log(`⚠ bound ${HOST} — reachable off this machine; token auth is ON`);
   console.log(`projects: ${listProjects().join(', ')}`);
 });

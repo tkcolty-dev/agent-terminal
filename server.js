@@ -886,7 +886,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/events') {
-    const room = getRoom(url.searchParams.get('project') || listProjects()[0] || 'playground');
+    // never resurrect a deleted/closed project just because a stale client reconnects
+    const want = slug(url.searchParams.get('project') || '');
+    const avail = listProjects();
+    const room = getRoom(avail.includes(want) ? want : (avail[0] || 'playground'));
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.write(`data: ${JSON.stringify(room.hello())}\n\n`);
     room.clients.add(res);
@@ -1073,9 +1076,12 @@ const server = http.createServer(async (req, res) => {
   if (p === '/projects/close' && req.method === 'POST') {
     const { id } = await readBody(req);
     if (rooms.has(id) || fs.existsSync(path.join(PROJECTS_DIR, id))) {
-      shutRoom(id);
       if (!closedProjects.includes(id)) { closedProjects.push(id); saveClosed(); }
-      broadcastAll('projects', { projects: listProjects() });
+      const remaining = listProjects();
+      const room = rooms.get(id);
+      if (room) room.broadcast('projects', { projects: remaining }); // redirect its viewers BEFORE cutting them off
+      shutRoom(id);
+      broadcastAll('projects', { projects: remaining });
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');
@@ -1086,12 +1092,16 @@ const server = http.createServer(async (req, res) => {
     const { id } = await readBody(req);
     const dir = path.join(PROJECTS_DIR, id);
     if (fs.existsSync(dir)) {
-      shutRoom(id);
+      const room = rooms.get(id);
+      if (room) { room.running = false; for (const a of room.agents) a.kill(); } // stop writers before moving the dir
       const trash = path.join(ROOT, '.trash');
       fs.mkdirSync(trash, { recursive: true });
       fs.renameSync(dir, path.join(trash, `${id}-${Date.now()}`)); // recoverable, not rm -rf
       closedProjects = closedProjects.filter(x => x !== id); saveClosed();
-      broadcastAll('projects', { projects: listProjects() });
+      const remaining = listProjects();
+      if (room) room.broadcast('projects', { projects: remaining }); // redirect its viewers BEFORE cutting them off
+      shutRoom(id);
+      broadcastAll('projects', { projects: remaining });
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');

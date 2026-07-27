@@ -23,6 +23,6 @@
   "type": "claude",
   "model": "claude-opus-4-8",
   "modelFlag": "claude-opus-4-8",
-  "limit": 1000000
+  "limit": 5000000
  }
 ]

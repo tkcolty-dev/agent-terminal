@@ -207,6 +207,7 @@
     <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
     <div class="title">AGENT TERMINAL — MULTI-AGENT ROOM</div>
     <span class="work-chip" id="workChip">● idle</span>
+    <button class="btn" id="sndBtn" title="toggle sounds">🔊</button>
     <a class="btn" href="/usage" target="_blank" style="color:#79c0ff;text-decoration:none">📊 Usage</a>
     <button class="btn preview" id="previewBtn">▶ Live Build</button>
     <button class="btn" id="pauseBtn" style="color:#febc2e">⏸ Pause</button>
@@ -302,6 +303,42 @@
   </div>
 </div>
 <script>
+// ---- sound system (all WebAudio-synthesized, no files) ----
+const SND = {
+  ctx: null,
+  muted: localStorage.getItem('at-muted') === '1',
+  booted: false, // no sound while replaying history on load
+  ensure() {
+    if (!this.ctx) { try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+    if (this.ctx?.state === 'suspended') this.ctx.resume();
+    return this.ctx;
+  },
+  tone(freq, { dur = 0.12, type = 'sine', vol = 0.07, delay = 0, slide = 0 } = {}) {
+    if (this.muted || !this.booted) return;
+    const ctx = this.ensure(); if (!ctx) return;
+    const t = ctx.currentTime + delay;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), t + dur);
+    o.connect(g); g.connect(ctx.destination);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.start(t); o.stop(t + dur + 0.05);
+  },
+  // each agent speaks at its own pitch, so you can hear WHO replied
+  agentPitch(id) {
+    let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 997;
+    return 330 * Math.pow(2, (h % 13) / 12); // a note between E4 and ~E5
+  },
+  msg(agentId) { const f = this.agentPitch(agentId); this.tone(f, { dur: .09 }); this.tone(f * 1.5, { dur: .12, delay: .07, vol: .05 }); },
+  user() { this.tone(880, { dur: .05, type: 'triangle', vol: .04 }); },
+  error() { this.tone(220, { dur: .25, type: 'square', vol: .05, slide: -80 }); },
+  join() { this.tone(523, { dur: .1 }); this.tone(784, { dur: .15, delay: .09 }); },
+  done() { [[660, 0], [830, .12], [990, .24]].forEach(([f, d]) => this.tone(f, { dur: .28, delay: d, vol: .1 })); },
+};
+document.addEventListener('click', () => SND.ensure(), { once: true });
+document.addEventListener('keydown', () => SND.ensure(), { once: true });
+
 const chat = document.getElementById('chat');
 const agentsEl = document.getElementById('agents');
 const filesEl = document.getElementById('files');
@@ -338,6 +375,12 @@ function addMsg(m) {
   }
   chat.appendChild(div);
   scrollDown(stick || m.from === 'user');
+  // sounds: each agent has its own pitch; errors buzz; connects chime
+  if (m.from === 'user') SND.user();
+  else if (m.from === 'system') {
+    if (m.text.startsWith('⚠') || m.text.startsWith('⛔')) SND.error();
+    else if (m.text.includes('connected to the room')) SND.join();
+  } else SND.msg(m.from);
 }
 
 const lastAct = {};
@@ -391,16 +434,7 @@ function showDone(text) {
   clearTimeout(showDone.t);
   showDone.t = setTimeout(() => { b.hidden = true; }, 15000);
   b.onclick = () => { b.hidden = true; };
-  try { // little two-note chime
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    [[660, 0], [990, .15]].forEach(([f, d]) => {
-      const o = ctx.createOscillator(), g = ctx.createGain();
-      o.frequency.value = f; o.connect(g); g.connect(ctx.destination);
-      g.gain.setValueAtTime(.12, ctx.currentTime + d);
-      g.gain.exponentialRampToValueAtTime(.001, ctx.currentTime + d + .3);
-      o.start(ctx.currentTime + d); o.stop(ctx.currentTime + d + .3);
-    });
-  } catch {}
+  SND.done();
 }
 
 function kfmt(n) { return n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n); }
@@ -615,6 +649,7 @@ function connect(project) {
       setRoblox(ev.robloxMode);
       schedulePreviewReload(ev.files || [], true);
       scrollDown(true);
+      SND.booted = false; setTimeout(() => { SND.booted = true; }, 600); // don't replay history as a symphony
       if (!ev.messages.length) addMsg({ from: 'system', text: '● room open — your agents are standing by. Type a task below.', ts: Date.now() });
     }
     else if (ev.type === 'msg') addMsg(ev);
@@ -750,6 +785,12 @@ window.addEventListener('drop', e => {
   e.preventDefault(); dragDepth = 0; document.getElementById('dropOverlay').hidden = true;
   if (e.dataTransfer?.files?.length) uploadFiles([...e.dataTransfer.files]);
 });
+
+// ---- sound mute toggle
+const sndBtn = document.getElementById('sndBtn');
+function renderSnd() { sndBtn.textContent = SND.muted ? '🔇' : '🔊'; sndBtn.style.opacity = SND.muted ? .5 : 1; }
+sndBtn.onclick = () => { SND.muted = !SND.muted; localStorage.setItem('at-muted', SND.muted ? '1' : '0'); renderSnd(); if (!SND.muted) { SND.booted = true; SND.msg('claude'); } };
+renderSnd();
 
 // ---- connect agent dialog
 const overlay = document.getElementById('overlay');

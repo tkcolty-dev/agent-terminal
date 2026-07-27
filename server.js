@@ -25,7 +25,8 @@ const INBOX_MAX_CHARS = 6000;  // …capped at this many chars
 const CHEAP_MODEL = 'claude-haiku-4-5-20251001'; // [trivial]-tagged tasks route here
 const KEEPWARM_MS = 4.5 * 60 * 1000;  // ping resumed sessions just under the 5-min cache TTL
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
-const BRIEF_V = 11;            // bump to re-send the room briefing to existing agents
+const BRIEF_V = 12;            // bump to re-send the room briefing to existing agents
+const JANITOR_EVERY = 20;      // cheap memory-janitor pass after this many room turns
 
 // ---------------------------------------------------------------- migration
 // v1 kept a single ./workspace + ./state.json — fold it into projects/drum-machine
@@ -143,6 +144,7 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
   Untagged turns run LEAN (files+shell only) — a worker missing a capability reports it once and you re-issue with the tag.
 - Size every task so a worker can FINISH IT IN ONE TURN. Bigger jobs = several short rounds.
 - Assign both workers in ONE message when tasks are independent, so they run in parallel.
+- CHAIN HAND-OFFS FOR FREE: add [after:Name] to an assignment and the harness auto-starts it when Name finishes — no lead turn needed. Example: "@Claudious [normal][after:Codex] browser-test game.js. CHECK: page loads, no console errors."
 - NEVER GO SILENT: after every worker report you MUST reply with either (a) the next one-line assignment(s), or (b) the finish line. The user must never wonder what's happening.
 - THE FINISH LINE: when the user's request is fully done and verified, your final message MUST start with exactly "✅ DONE — " followed by a one-line summary. This triggers the big completion banner the user watches for. Never use that prefix before everything is truly done.
 - Be extremely token-frugal: short assignments, short reports, no filler.` :
@@ -260,7 +262,8 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       if (text && !text.toUpperCase().startsWith('[SKIP]')) this.room.post(this.id, this.name, text);
       else this.activity('⏭ turn ended with nothing to post'); // visible, so silence is never a mystery
     } catch (err) {
-      this.room.sys(`⚠ ${this.name} turn failed: ${String(err).slice(0, 300)}`);
+      // crashed turns are announced (this wakes the lead so it can re-assign) and locks released
+      this.room.sys(`⚠ ${this.name}'s turn failed after ${Math.round((Date.now() - t0) / 1000)}s: ${String(err).slice(0, 200)} — file locks released, task may need re-assigning.`);
     } finally {
       this.stats.ms += Date.now() - t0;
       this.stats.lastActive = Date.now();
@@ -285,9 +288,11 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       this.room.broadcast('agents', { agents: this.room.agentList() }); // refresh token meters
       checkLimitWarnings(this);
       broadcastUsage();
+      this.room.turnsSinceJanitor = (this.room.turnsSinceJanitor || 0) + 1;
       this.room.scheduleTurns();
       this.room.deadAirCheck();
       this.room.armKeepWarm();
+      this.room.maybeJanitor();
     }
   }
 
@@ -365,7 +370,9 @@ class ClaudeAgent extends AgentRunner {
       // full default surface (Playwright plugin etc.) — only for tagged browser-test turns
     } else {
       // LEAN PROFILE (measured -71.6% cold-start): core tools only, no plugins/skills/MCP
-      const base = this.role === 'lead' ? 'Read,Edit,Write' : 'Bash,Read,Edit,Write';
+      // tag-scoped power: [trivial] turns can only read/edit — no shell, no new files
+      const base = caps.trivial ? 'Read,Edit'
+        : this.role === 'lead' ? 'Read,Edit,Write' : 'Bash,Read,Edit,Write';
       const tools = caps.web ? `${base},WebSearch,WebFetch` : base;
       args.push('--strict-mcp-config', '--disable-slash-commands', '--tools', tools);
     }
@@ -628,6 +635,31 @@ class Room {
     }
   }
 
+  // Every JANITOR_EVERY turns, a cheap lean model tidies MEMORY.md/TASKBOARD.md
+  // (merge dupes, prune stale bullets, archive finished work) so context stops rotting.
+  maybeJanitor() {
+    if (this.janitorRunning) return;
+    if ((this.turnsSinceJanitor || 0) < JANITOR_EVERY) return;
+    if (this.agents.some(a => a.busy)) return; // only in a quiet moment
+    this.janitorRunning = true;
+    this.turnsSinceJanitor = 0;
+    const args = ['-p', '--output-format', 'json', '--max-turns', '8', '--dangerously-skip-permissions',
+      '--strict-mcp-config', '--disable-slash-commands', '--tools', 'Read,Edit,Write', '--model', CHEAP_MODEL];
+    const proc = spawn('claude', args, { cwd: this.workspace, env: { ...process.env } });
+    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3 * 60 * 1000);
+    proc.on('close', code => {
+      clearTimeout(timer);
+      this.janitorRunning = false;
+      if (code === 0) this.sys('🧹 memory janitor tidied MEMORY.md / TASKBOARD.md (merged dupes, archived stale entries)');
+    });
+    proc.on('error', () => { clearTimeout(timer); this.janitorRunning = false; });
+    proc.stdin.write(`You are the memory janitor for this project workspace. Tidy exactly two files and nothing else:
+1. MEMORY.md — merge duplicate bullets, delete superseded/contradictory ones, move finished-project info into MEMORY-archive.md (create if missing).
+2. TASKBOARD.md — move done rows that are no longer relevant into an "## Archive" section at the bottom.
+Preserve every fact that is still current. Do not add commentary. Reply with just: tidied.`);
+    proc.stdin.end();
+  }
+
   // If the lead spoke, assigned nobody, and the room went quiet — tell the user why nothing is happening.
   deadAirCheck() {
     if (this.agents.some(a => a.busy)) return;
@@ -671,7 +703,15 @@ class Room {
   // Does this message wake this agent? (@mentions route; [IDLE] doesn't wake;
   // with a lead in the room: user+worker messages go to the lead, lead assigns via @mentions)
   wakes(m, agent) {
-    if (m.from === 'system' || m.from === agent.id) return false;
+    if (m.from === agent.id) return false;
+    // crash reports wake the lead so it can re-assign instead of waiting forever
+    if (m.from === 'system') return agent.role === 'lead' && m.text.startsWith('⚠');
+    // task dependencies: "[after:Codex]" holds this wake until Codex posts a reply later than the assignment
+    const dep = m.text.match(/\[after:\s*@?([A-Za-z0-9_-]+)\]/i);
+    if (dep) {
+      const w = this.agents.find(x => x.name.toLowerCase().split(/[^a-z0-9]+/)[0] === dep[1].toLowerCase() || x.id === dep[1].toLowerCase());
+      if (w && w !== agent && !this.messages.some(x => x.from === w.id && x.n > m.n)) return false;
+    }
     // ack-gate: pure acknowledgments never wake a model — zero tokens
     if (/^(ok(ay)?|k|thanks?( you)?|nice( one)?|good( job| work)?|got it|cool|great|perfect|👍|sounds good)[.! 🙂👍]*$/i.test(m.text.trim())) return false;
     const targets = this.mentionTargets(m.text);
@@ -891,6 +931,35 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/') return serveFile(res, path.join(ROOT, 'public', 'index.html'));
   if (p === '/usage') return serveFile(res, path.join(ROOT, 'public', 'usage.html'));
+
+  // /status/<project> — always-current snapshot page, zero agent tokens
+  const sm = p.match(/^\/status\/([^/]+)\/?$/);
+  if (sm && rooms.get(sm[1])) {
+    const room = rooms.get(sm[1]);
+    const u = roomUsage(room);
+    const esc2 = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const rows = room.agents.map(a => `<tr>
+      <td style="color:${a.color};font-weight:700">${esc2(a.name)}${a.role === 'lead' ? ' 👑' : ''}</td>
+      <td>${a.busy ? '⚙ working' : '● ready'}</td>
+      <td>${esc2(a.lastActivityText || '—')}</td>
+      <td class="n">${a.stats.turns}</td><td class="n">${kfmtSrv(tokTotal(a.tokens))}</td>
+      <td class="n">${a.tokens.cost ? '~$' + a.tokens.cost.toFixed(2) : '—'}</td></tr>`).join('');
+    const lastDone = [...room.messages].reverse().find(m => /^✅\s*DONE/i.test(m.text.trim()));
+    const warns = room.messages.filter(m => m.from === 'system' && m.text.startsWith('⚠')).slice(-3);
+    let board = ''; try { board = fs.readFileSync(path.join(room.workspace, 'TASKBOARD.md'), 'utf8'); } catch {}
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`<!DOCTYPE html><meta http-equiv="refresh" content="5"><title>STATUS — ${esc2(room.id)}</title>
+<body style="background:#0a0e14;color:#c8d3e0;font-family:ui-monospace,Menlo,monospace;font-size:13px;padding:28px;max-width:1000px;margin:0 auto">
+<h2 style="letter-spacing:2px;color:#5c6b80">STATUS — ${esc2(room.id)} <span style="font-size:11px">(live, refreshes every 5s · <a style="color:#7ee787" href="/?project=${encodeURIComponent(room.id)}">terminal</a> · <a style="color:#7ee787" href="/preview/${encodeURIComponent(room.id)}/">preview</a>)</span></h2>
+<table border=0 cellpadding=7 style="border-collapse:collapse;width:100%;background:#0f141c;border:1px solid #1e2836">
+<tr style="color:#5c6b80;font-size:10px;letter-spacing:1px"><th align=left>AGENT</th><th align=left>STATE</th><th align=left>LAST ACTION</th><th>TURNS</th><th>TOKENS</th><th>COST</th></tr>${rows}</table>
+<p style="margin-top:14px">💰 room total: <b>${kfmtSrv(u.tok)}</b> tokens · <b>~$${u.cost.toFixed(2)}</b> ${room.running ? '' : ' · <b style="color:#febc2e">⏸ PAUSED</b>'}</p>
+${lastDone ? `<p style="color:#7ee787">last finish: ${esc2(lastDone.text.slice(0, 160))}</p>` : ''}
+${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => esc2(w.text.slice(0, 140))).join('<br>')}</p>` : ''}
+<h3 style="letter-spacing:2px;color:#5c6b80;margin-top:20px">TASK BOARD</h3>
+<pre style="background:#0f141c;border:1px solid #1e2836;padding:12px;white-space:pre-wrap">${esc2(board)}</pre></body>`);
+    return;
+  }
 
   if (p === '/usage.json') {
     const data = {

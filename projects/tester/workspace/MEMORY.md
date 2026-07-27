@@ -19,3 +19,6 @@
 ## Harness feedback (2026-07-27)
 - Boss feedback: FEEDBACK-harness.md. Codex worker feedback: FEEDBACK-codex.md.
 - Codex priorities: compact delta wakes, per-turn cost/cache telemetry, atomic file leases, and a browser-test path available without waking another model.
+- Post-change audit (Codex, 2026-07-27, `node --check server.js` PASS): 2/6 shortlist items PASS (cache-safe delta ordering, cost/telemetry), 2/6 partial (tag budgets = Claude max-turns only, no Codex cap; CHECK/PASS rules are prompt-side only, not machine-enforced), 2/6 FAIL (browser queue/persistent context deferred; atomic file leases deferred).
+- Remaining harness gaps are known and deferred, not forgotten — pick back up when user greenlights another round.
+- Round-2 Codex feedback is complete in FEEDBACK2-codex.md: 7 new plain-language topics, with required what/why/build structure and no overlap with the two exclusion files.

@@ -729,6 +729,7 @@ function renderUsage(u) {
   bar.title = '$ estimates cover the Claude side only — Codex bills to your ChatGPT plan';
   bar.innerHTML =
     `<span><a href="/preview/${encodeURIComponent(currentProject)}/" target="_blank" style="color:var(--green);text-decoration:none">🔗 open ${esc(currentProject)} ↗</a></span>` +
+    `<span><a href="/status/${encodeURIComponent(currentProject)}" target="_blank" style="color:#79c0ff;text-decoration:none">📋 status ↗</a></span>` +
     `<span>💰 this room: <b>${kfmt(r.tok)}</b> tok · <b>~$${r.cost.toFixed(2)}</b></span>` +
     `<span>all projects: <b>${kfmt(g.tok)}</b> tok · <b>~$${g.cost.toFixed(2)}</b></span>` + plan;
 }

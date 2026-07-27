@@ -85,6 +85,7 @@ class AgentRunner {
     this.room.broadcast('status', { agent: this.id, status, detail, model: this.model });
   }
   activity(text) {
+    if (!/^[📊♨]/u.test(text)) this.lastActivityText = text; // mid-turn heartbeat for teammates
     this.room.broadcast('activity', { agent: this.id, name: this.name, text, ts: Date.now() });
   }
 
@@ -188,7 +189,7 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
     const live = this.room.agents.filter(a => a !== this && a.busy);
     if (live.length) {
       prompt += `--- LIVE RIGHT NOW (current, not cached) ---\n` + live.map(a =>
-        `${a.name} is mid-turn${a.currentEdits.size ? `, editing: ${[...a.currentEdits].join(', ')} — do NOT touch these files` : ''}`
+        `${a.name} is mid-turn${a.currentEdits.size ? `, editing: ${[...a.currentEdits].join(', ')} — do NOT touch these files` : ''}${a.lastActivityText ? ` (last action: ${a.lastActivityText})` : ''}`
       ).join('\n') + `\n--- END LIVE ---\n\n`;
     }
     prompt += `Do any real work needed (files/commands in the shared workspace), then post your short reply to the room.`;
@@ -235,6 +236,11 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       .filter(m => m.from !== this.id).map(m => m.text).join('\n');
     this.capabilities = this.turnCapabilities(pendingText);
     this.turnModelOverride = (this.capabilities.trivial && this.role !== 'lead') ? CHEAP_MODEL : null;
+    // lead-turn downgrade: pure routing/review wakes (no user message pending) don't need the flagship model
+    if (this.role === 'lead' && !this.modelFlag) {
+      const hasUserMsg = this.room.messages.slice(this.seenUpTo).some(mm => mm.from === 'user');
+      if (!hasUserMsg) this.turnModelOverride = 'claude-sonnet-5';
+    }
     const profile = JSON.stringify([!!this.capabilities.browser, !!this.capabilities.web, !!this.capabilities.roblox, this.turnModelOverride]);
     if (this.shouldRotateSession(profile)) {
       this.sessionId = null;

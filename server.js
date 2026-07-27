@@ -18,10 +18,14 @@ const CODEX_BIN = '/Applications/ChatGPT.app/Contents/Resources/codex';
 const MAX_AUTO_TURNS = 3;      // agent-to-agent turns allowed per user message (keep chatter cheap)
 const ROTATE_WORKER_TURNS = 6; // fresh CLI session after this many turns (bounds context growth)
 const ROTATE_LEAD_TURNS = 10;
+const ROTATE_CTX_TOKENS = 80000;      // …or when resumed context crosses this size
+const IDLE_COLD_MS = 55 * 60 * 1000;  // idle past this → cache is cold anyway, rotate
 const INBOX_MAX_MSGS = 6;      // per-wake inbox: last N relevant messages…
 const INBOX_MAX_CHARS = 6000;  // …capped at this many chars
+const CHEAP_MODEL = 'claude-haiku-4-5-20251001'; // [trivial]-tagged tasks route here
+const KEEPWARM_MS = 4.5 * 60 * 1000;  // ping resumed sessions just under the 5-min cache TTL
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
-const BRIEF_V = 9;             // bump to re-send the room briefing to existing agents
+const BRIEF_V = 10;            // bump to re-send the room briefing to existing agents
 
 // ---------------------------------------------------------------- migration
 // v1 kept a single ./workspace + ./state.json — fold it into projects/drum-machine
@@ -127,8 +131,13 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
 - The user's messages come to YOU. You own the plan, the TASKBOARD.md, and the final report.
 - You do NOT build product code yourself (tiny fixes are fine) — you break work into clear tasks and assign each with an @mention. Workers ONLY wake when you @mention them.
 - ASSIGNMENT FORMAT — scannable, one line per worker, nothing else:
-  @Codex → build game.js (engine + input)
-  @Claude → style index.html, then browser-test
+  @Codex → [normal] build game.js (engine + input)
+  @Claude → [normal][browser] style index.html, then browser-test
+- TAG EVERY ASSIGNMENT (cost control — the server routes on these):
+  [trivial] = one-liners/renames/acks → runs on a cheap fast model
+  [normal] = standard implementation (default)   [hard] = genuinely tricky work
+  [browser] = needs browser testing tools   [web] = needs web search
+  Untagged turns run LEAN (files+shell only) — a worker missing a capability reports it once and you re-issue with the tag.
 - Size every task so a worker can FINISH IT IN ONE TURN. Bigger jobs = several short rounds.
 - Assign both workers in ONE message when tasks are independent, so they run in parallel.
 - NEVER GO SILENT: after every worker report you MUST reply with either (a) the next one-line assignment(s), or (b) the finish line. The user must never wonder what's happening.
@@ -183,10 +192,28 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
 
   // Session rotation: --resume sessions grow forever and re-bill at full price
   // after the prompt-cache TTL. A fresh session with MEMORY.md carry-over keeps
-  // cost linear instead of quadratic.
-  shouldRotateSession() {
+  // cost linear instead of quadratic. Rotate on turn cap, context size, capability
+  // profile change, or when idle so long the cache is cold anyway.
+  shouldRotateSession(profile) {
+    if (!this.sessionId) return false;
     const cap = this.role === 'lead' ? ROTATE_LEAD_TURNS : ROTATE_WORKER_TURNS;
-    return this.sessionId && (this.sessionTurns || 0) >= cap;
+    if ((this.sessionTurns || 0) >= cap) return true;
+    if ((this.sessionCtx || 0) > ROTATE_CTX_TOKENS) return true;
+    if (this.sessionLastActive && Date.now() - this.sessionLastActive > IDLE_COLD_MS) return true;
+    if (this.sessionProfile && profile !== this.sessionProfile) return true; // lean↔full toolset switch
+    return false;
+  }
+
+  // Capability + model hints parsed from the pending assignment text.
+  // The lead tags tasks: [browser] [web] [trivial] [hard] (see briefing).
+  turnCapabilities(text) {
+    const t = text.toLowerCase();
+    return {
+      browser: /\[browser\]|browser-test|playwright|screenshot|visual qa/.test(t),
+      web: /\[web\]|web.search|research\b|look up|latest docs/.test(t),
+      roblox: this.room.robloxMode,
+      trivial: /\[trivial\]/.test(t),
+    };
   }
 
   async runTurn() {
@@ -196,13 +223,22 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
     this.stats.turns++;
     this.stats.lastActive = t0;
     this.currentEdits = new Set();
-    if (this.shouldRotateSession()) {
+    // parse capability/model hints from what this agent is about to read
+    const pendingText = this.room.messages.slice(this.seenUpTo)
+      .filter(m => m.from !== this.id).map(m => m.text).join('\n');
+    this.capabilities = this.turnCapabilities(pendingText);
+    this.turnModelOverride = (this.capabilities.trivial && this.role !== 'lead') ? CHEAP_MODEL : null;
+    const profile = JSON.stringify([!!this.capabilities.browser, !!this.capabilities.web, !!this.capabilities.roblox, this.turnModelOverride]);
+    if (this.shouldRotateSession(profile)) {
       this.sessionId = null;
       this.briefedV = 0; // fresh session needs the (cached) briefing again
       this.sessionTurns = 0;
+      this.sessionCtx = 0;
       this.activity('♻ fresh session (cost control) — carrying over via MEMORY.md');
     }
+    this.sessionProfile = profile;
     this.sessionTurns = (this.sessionTurns || 0) + 1;
+    this.sessionLastActive = Date.now();
     const prompt = this.buildPrompt();
     try {
       const reply = await this.spawnTurn(prompt);
@@ -226,11 +262,32 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       broadcastUsage();
       this.room.scheduleTurns();
       this.room.deadAirCheck();
+      this.room.armKeepWarm();
     }
   }
 
   kill() {
+    clearTimeout(this._warmTimer);
     if (this.proc) { try { this.proc.kill('SIGTERM'); } catch {} }
+  }
+
+  // Keep-warm: the CLI prompt cache dies after ~5 idle minutes and the next wake
+  // re-bills the whole session fresh. While the room has pending work, ping idle
+  // resumed sessions just under the TTL so they stay at cache-read price.
+  async keepWarm() {
+    if (this.busy || !this.sessionId || !this.room.running) return;
+    if (!this.room.agents.some(a => a !== this && a.busy)) return; // room quiet → let it go cold
+    this.busy = true;
+    try {
+      this.activity('♨ cache keep-warm ping');
+      await this.spawnTurn('(cache keep-warm — no action needed, reply exactly [SKIP])');
+      this.sessionLastActive = Date.now();
+    } catch {}
+    this.busy = false;
+    this.proc = null;
+    this.room.saveState();
+    this.room.armKeepWarm();
+    this.room.scheduleTurns(); // anything that arrived while warming
   }
 
   spawnTurn(prompt) {
@@ -276,8 +333,18 @@ class ClaudeAgent extends AgentRunner {
   command() {
     const args = ['-p', '--output-format', 'stream-json', '--verbose',
       '--dangerously-skip-permissions', '--max-turns', '12'];
-    if (this.room.robloxMode) args.push('--mcp-config', MCP_ROBLOX_FILE); // Studio tools only when the room wants them
-    if (this.modelFlag) args.push('--model', this.modelFlag);
+    const caps = this.capabilities || {};
+    if (caps.browser) {
+      // full default surface (Playwright plugin etc.) — only for tagged browser-test turns
+    } else {
+      // LEAN PROFILE (measured -71.6% cold-start): core tools only, no plugins/skills/MCP
+      const base = this.role === 'lead' ? 'Read,Edit,Write' : 'Bash,Read,Edit,Write';
+      const tools = caps.web ? `${base},WebSearch,WebFetch` : base;
+      args.push('--strict-mcp-config', '--disable-slash-commands', '--tools', tools);
+    }
+    if (caps.roblox) args.push('--mcp-config', MCP_ROBLOX_FILE); // Studio tools only when the room wants them
+    const model = this.turnModelOverride || this.modelFlag;
+    if (model) args.push('--model', model);
     if (this.sessionId) args.push('--resume', this.sessionId);
     return { cmd: 'claude', args };
   }
@@ -308,6 +375,8 @@ class ClaudeAgent extends AgentRunner {
       this.tokens.cached = (this.tokens.cached || 0) + (u.cache_read_input_tokens || 0);
       this.tokens.out += u.output_tokens || 0;
       this.tokens.cost += ev.total_cost_usd || 0;
+      // resumed-context size estimate for size-based rotation
+      this.sessionCtx = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
       return typeof ev.result === 'string' ? ev.result : '';
     }
     return null;
@@ -334,9 +403,12 @@ class CodexAgent extends AgentRunner {
     // NOTE: `codex exec resume` rejects --sandbox; sandbox must go through -c.
     const base = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"',
       '-c', 'sandbox_workspace_write.network_access=true', '-c', 'tools.web_search=true', '-c', 'notify=[]'];
+    // LEAN PROFILE: skip the user's 8 artifact/browser plugins on standard coding turns
+    // (auth is preserved; the -c args above restore sandbox/network/web-search)
+    const lean = (this.capabilities?.browser) ? [] : ['--ignore-user-config'];
     const args = this.sessionId
       ? ['exec', 'resume', this.sessionId, ...base, '-']
-      : ['exec', ...base, '-'];
+      : ['exec', ...lean, ...base, '-'];
     return { cmd: CODEX_BIN, args };
   }
   handleEvent(ev, texts) {
@@ -369,6 +441,7 @@ class CodexAgent extends AgentRunner {
       this.tokens.in += Math.max(0, (u.input_tokens || 0) - cached);
       this.tokens.cached = (this.tokens.cached || 0) + cached;
       this.tokens.out += (u.output_tokens || 0);
+      this.sessionCtx = u.input_tokens || 0; // resumed-context size for rotation
       return texts.length ? texts.join('\n\n') : '';
     }
     return null;
@@ -471,6 +544,9 @@ class Room {
           if (sa.stats) a.stats = { ...a.stats, ...sa.stats };
           if (sa.model) a.model = sa.model;
           a.sessionTurns = sa.sessionTurns || 0;
+          a.sessionCtx = sa.sessionCtx || 0;
+          a.sessionLastActive = sa.sessionLastActive || 0;
+          a.sessionProfile = sa.sessionProfile || null;
         }
       }
     } catch {}
@@ -483,7 +559,11 @@ class Room {
         talkMode: this.talkMode,
         robloxMode: this.robloxMode,
         messages: this.messages,
-        agents: this.agents.map(a => ({ id: a.id, sessionId: a.sessionId, briefedV: a.briefedV || 0, seenUpTo: a.seenUpTo, tokens: a.tokens, stats: a.stats, model: a.model, sessionTurns: a.sessionTurns || 0 })),
+        agents: this.agents.map(a => ({
+          id: a.id, sessionId: a.sessionId, briefedV: a.briefedV || 0, seenUpTo: a.seenUpTo,
+          tokens: a.tokens, stats: a.stats, model: a.model, sessionTurns: a.sessionTurns || 0,
+          sessionCtx: a.sessionCtx || 0, sessionLastActive: a.sessionLastActive || 0, sessionProfile: a.sessionProfile || null,
+        })),
       };
       fs.writeFile(this.stateFile, JSON.stringify(state), () => {});
     }, 300);
@@ -508,6 +588,17 @@ class Room {
     return m;
   }
   sys(text) { this.post('system', 'system', text); }
+
+  // While any agent is working, keep the other agents' resumed sessions warm
+  // (gated: nobody busy → no pings, so an idle room costs zero).
+  armKeepWarm() {
+    for (const a of this.agents) {
+      clearTimeout(a._warmTimer);
+      if (a.busy || !a.sessionId) continue;
+      if (!this.agents.some(x => x !== a && x.busy)) continue;
+      a._warmTimer = setTimeout(() => a.keepWarm(), KEEPWARM_MS);
+    }
+  }
 
   // If the lead spoke, assigned nobody, and the room went quiet — tell the user why nothing is happening.
   deadAirCheck() {
@@ -553,6 +644,8 @@ class Room {
   // with a lead in the room: user+worker messages go to the lead, lead assigns via @mentions)
   wakes(m, agent) {
     if (m.from === 'system' || m.from === agent.id) return false;
+    // ack-gate: pure acknowledgments never wake a model — zero tokens
+    if (/^(ok(ay)?|k|thanks?( you)?|nice( one)?|good( job| work)?|got it|cool|great|perfect|👍|sounds good)[.! 🙂👍]*$/i.test(m.text.trim())) return false;
     const targets = this.mentionTargets(m.text);
     if (targets.size) return targets.has(agent.id); // routed: only mentioned agents wake
     const lead = this.agents.find(a => a.role === 'lead');

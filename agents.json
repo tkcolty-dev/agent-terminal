@@ -31,7 +31,8 @@
   "color": "#7ee787",
   "type": "claude",
   "model": "claude-sonnet-5",
-  "modelFlag": "claude-sonnet-5"
+  "modelFlag": "claude-sonnet-5",
+  "limit": 1000000
  },
  {
   "id": "haiku",
@@ -39,6 +40,7 @@
   "color": "#f778ba",
   "type": "claude",
   "model": "claude-haiku-4-5-20251001",
-  "modelFlag": "claude-haiku-4-5-20251001"
+  "modelFlag": "claude-haiku-4-5-20251001",
+  "limit": 1000000
  }
 ]

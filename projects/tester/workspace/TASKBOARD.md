@@ -5,5 +5,10 @@
 | Token audit of server.js | Codex | done | ideas-codex.md |
 | Token audit of server.js | Claudious | done | ideas-claudious.md |
 | Merged efficiency plan | Boss | done | PLAN-token-efficiency.md |
-| Implement plan in server.js | — | awaiting user OK | ../../../server.js |
+| Round-1 fixes in server.js | user | done (verified ~70-80% cut) | ../../../server.js |
+| Round-2 audit: cold-wake floor | Codex | done | round2-codex.md |
+| Round-2 research: TTL + routing | Claudious | done | round2-claudious.md |
+| Round-2 external model panel | Boss | done | round2-panel.md |
+| Round-2 merged plan | Boss | done | PLAN-round2.md |
+| Implement round 2 | — | awaiting user OK | ../../../server.js |
 | Breakout game (paused by user) | Codex/— | on hold | game.js |

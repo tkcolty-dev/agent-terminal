@@ -493,8 +493,11 @@ function renderAgents() {
   agentsEl.querySelectorAll('[data-kick]').forEach(el => {
     el.onclick = () => {
       const a = agentInfo[el.dataset.kick];
-      if (a && confirm(`Disconnect ${a.name} from all projects?`))
-        fetch('/agents/remove', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id: el.dataset.kick }) });
+      // Removes from THIS project only — the agent stays in your roster and can be
+      // added back here, or to another project, from the connect dialog.
+      if (a && confirm(`Remove ${a.name} from "${currentProject}"? It stays available for other projects.`))
+        fetch('/agents/remove', { method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ id: el.dataset.kick, project: currentProject }) });
     };
   });
 }
@@ -642,6 +645,8 @@ function connect(project) {
       for (const k in agentInfo) delete agentInfo[k];
       for (const a of ev.agents) agentInfo[a.id] = a;
       renderAgents();
+      // the server replays a bounded tail; older messages stay in state.json
+      if (ev.truncated) addMsg({ from: 'system', text: `… ${ev.truncated} earlier messages not shown`, ts: Date.now() });
       for (const m of ev.messages) addMsg(m);
       claims = ev.claims || {};
       renderFiles(ev.files || []);
@@ -811,8 +816,12 @@ document.getElementById('agConnect').onclick = async () => {
   const type = document.getElementById('agType').value;
   const modelFlag = document.getElementById('agModel').value;
   if (!name) return alert('Give the agent a name');
+  // Re-using the name of an agent you already own adds that same agent to this
+  // project rather than creating a duplicate.
   const r = await fetch('/agents/add', { method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, type, modelFlag: type === 'claude' ? modelFlag : undefined, role: document.getElementById('agLead').checked ? 'lead' : undefined }) });
+    body: JSON.stringify({ name, type, project: currentProject,
+      modelFlag: type === 'claude' ? modelFlag : undefined,
+      role: document.getElementById('agLead').checked ? 'lead' : undefined }) });
   if (r.status === 409) return alert((await r.json()).error || 'That name is taken');
   if (!r.ok) return alert('Could not connect agent');
   overlay.hidden = true;

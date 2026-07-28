@@ -79,7 +79,7 @@ const INBOX_MAX_CHARS = 6000;  // …capped at this many chars
 const CHEAP_MODEL = 'claude-haiku-4-5-20251001'; // [trivial]-tagged tasks route here
 const KEEPWARM_MS = 4.5 * 60 * 1000;  // ping resumed sessions just under the 5-min cache TTL
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
-const BRIEF_V = 13;            // bump to re-send the room briefing to existing agents (merged text = new version)
+const BRIEF_V = 14;            // bump to re-send the room briefing to existing agents (shared-skills + write-discipline rules)
 const JANITOR_EVERY = 20;      // cheap memory-janitor pass after this many room turns
 const HISTORY_REPLAY = 200;    // messages a connecting client gets (older stay on disk)
 
@@ -206,6 +206,19 @@ RULES OF THE ROOM:
    - NEVER post acknowledgment-only replies ("ok", "got it", "holding", "standing by").
    - Bundle your work: do EVERYTHING needed in one turn, then ONE short reply (≤3 sentences). Ask all your questions at once instead of back-and-forth.
    - Don't re-read files you already know, don't re-verify what a teammate verified, don't re-explain what's already in chat.` +
+   // Only stated when a shared library is actually mounted — otherwise it would be
+   // describing tools the agent doesn't have, which is the failure BRIEF_V 11 fixed.
+   (SKILLS_DIR ? `
+19. SHARED SKILLS: this room has a shared skill library — reusable instructions for
+   specific jobs, maintained outside this project. Check what you have and use one when
+   it fits instead of improvising. If one of them reaches knowledge from outside this room
+   (a memory or recall skill), READ from it freely: past decisions, conventions, gotchas
+   that predate this room are exactly what it is for.
+20. WRITE DISCIPLINE FOR SHARED KNOWLEDGE: MEMORY.md and .notes/ in THIS workspace are
+   yours to update. Anything outside this workspace is not. A shared store is synced to
+   other projects and other machines, and this room's working notes do not belong there —
+   you would be writing into someone else's context. If something you learned deserves to
+   outlive this room, say so in chat in one line and let the user promote it.` : '') +
    (this.role === 'lead' ? `
 
 YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
@@ -1312,6 +1325,51 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/') return serveFile(res, path.join(ROOT, 'public', 'index.html'));
   if (p === '/usage') return serveFile(res, path.join(ROOT, 'public', 'usage.html'));
+  if (p === '/status') return serveFile(res, path.join(ROOT, 'public', 'status.html'));
+
+  // "Where are we?" without reading the chat scroll — the lead asked for this in its
+  // own harness feedback. Everything here is derived from state the server already
+  // holds; nothing new is tracked and no agent is woken to produce it.
+  if (p === '/status.json') {
+    const rooms_ = [...rooms.values()].map(r => {
+      const msgs = r.messages;
+      const lastOf = pred => { for (let i = msgs.length - 1; i >= 0; i--) if (pred(msgs[i])) return msgs[i]; return null; };
+      const lead = r.agents.find(a => a.role === 'lead');
+      const doneMsg = lead ? lastOf(m => m.from === lead.id && saidDone(m.text)) : null;
+      const userMsg = lastOf(m => m.from === 'user');
+      // blockers = the reasons a room can look stalled, stated rather than inferred
+      const blockers = [];
+      if (!r.running) blockers.push('room is paused');
+      for (const a of r.agents) {
+        const lim = agentLimit(a.id);
+        if (lim && globalAgentTokens(a.id) >= lim) blockers.push(`${a.name} is benched at its ${kfmtSrv(lim)}-token limit`);
+        if (a.stats.escapes) blockers.push(`${a.name} was stopped ${a.stats.escapes}× for writing outside the workspace`);
+      }
+      if (r.autoTurns >= MAX_AUTO_TURNS && !r.agents.some(a => a.busy)) blockers.push('auto-chat cap reached — send a message to continue');
+      let board = '';
+      try { board = fs.readFileSync(path.join(r.workspace, 'TASKBOARD.md'), 'utf8'); } catch {}
+      return {
+        id: r.id, running: r.running, talkMode: r.talkMode,
+        messages: msgs.length,
+        lastUser: userMsg && { text: userMsg.text.slice(0, 240), ts: userMsg.ts },
+        lastDone: doneMsg && { text: doneLine(doneMsg.text), ts: doneMsg.ts },
+        blockers,
+        board,
+        usage: roomUsage(r),
+        agents: r.agents.map(a => ({
+          id: a.id, name: a.name, color: a.color, role: a.role || null,
+          model: a.model, status: a.status, busy: a.busy,
+          doing: a.lastActivityText || null,
+          editing: [...a.currentEdits],
+          stats: a.stats, tokens: a.tokens,
+          limit: agentLimit(a.id), usedGlobal: globalAgentTokens(a.id),
+        })),
+      };
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ updated: Date.now(), global: globalUsage(), rateLimit: lastRateLimit, rooms: rooms_ }));
+    return;
+  }
 
   // /status/<project> — always-current snapshot page, zero agent tokens
   const sm = p.match(/^\/status\/([^/]+)\/?$/);

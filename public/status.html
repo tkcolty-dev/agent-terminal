@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STATUS — Agent Terminal</title>
+<style>
+  :root {
+    --bg: #0a0e14; --panel: #0f141c; --panel2: #131a24; --border: #1e2836;
+    --text: #c8d3e0; --dim: #5c6b80; --green: #7ee787; --warn: #febc2e; --red: #ff5f57;
+    --blue: #79c0ff; --purple: #d2a8ff; --orange: #ff9668; --cyan: #58c4dc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #05070a; color: var(--text); font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 13px; padding: 24px; }
+  .wrap { max-width: 1150px; margin: 0 auto; }
+  h1 { font-size: 14px; letter-spacing: 3px; color: var(--dim); margin-bottom: 4px; }
+  .sub { color: var(--dim); font-size: 11px; margin-bottom: 20px; }
+  .sub a { color: var(--green); text-decoration: none; }
+  .ok { color: var(--green); } .warn { color: var(--warn); } .bad { color: var(--red); }
+
+  .room { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+  .room.busy { border-color: rgba(40,200,64,.4); }
+  .rhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .rname { font-size: 15px; font-weight: 700; }
+  .rname a { color: var(--text); text-decoration: none; }
+  .rname a:hover { color: var(--green); }
+  .pill { font-size: 10px; letter-spacing: 1px; padding: 2px 8px; border-radius: 20px; border: 1px solid currentColor; white-space: nowrap; }
+  .pill.working { color: var(--green); animation: pulse 1.2s infinite; }
+  .pill.idle { color: var(--dim); }
+  .pill.paused { color: var(--warn); }
+  @keyframes pulse { 50% { opacity: .45; } }
+  .rcost { margin-left: auto; color: var(--dim); font-size: 11px; }
+  .rcost b { color: var(--text); }
+
+  /* the three questions this page exists to answer, in order */
+  .line { display: flex; gap: 10px; padding: 5px 0; font-size: 11.5px; align-items: flex-start; }
+  .line .lk { color: var(--dim); min-width: 74px; flex: none; letter-spacing: .5px; }
+  .line .lv { color: var(--text); word-break: break-word; }
+  .blockers { border-left: 2px solid var(--red); padding: 6px 0 6px 12px; margin: 10px 0; }
+  .blockers .b { color: var(--red); font-size: 11.5px; padding: 2px 0; }
+  .done { border-left: 2px solid var(--green); padding: 6px 0 6px 12px; margin: 10px 0; color: var(--green); font-size: 11.5px; }
+
+  .agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin-top: 12px; }
+  .ag { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; }
+  .ag .top { display: flex; align-items: center; gap: 7px; }
+  .ag .nm { font-weight: 700; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; margin-left: auto; }
+  .dot.idle { background: #2a3a4a; } .dot.thinking { background: var(--warn); animation: pulse 1s infinite; }
+  .dot.working { background: #28c840; animation: pulse .6s infinite; }
+  .ag .doing { color: var(--dim); font-size: 10.5px; margin-top: 5px; min-height: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ag .nums { color: var(--dim); font-size: 10px; margin-top: 5px; }
+  .ag .editing { color: var(--orange); font-size: 10px; margin-top: 3px; }
+  .fuel { height: 3px; background: var(--bg); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+  .fuel > div { height: 100%; }
+
+  details.board { margin-top: 12px; }
+  details.board summary { color: var(--dim); font-size: 10.5px; letter-spacing: 1.5px; cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  td, th { border: 1px solid var(--border); padding: 4px 8px; font-size: 11px; text-align: left; }
+  th { color: var(--dim); font-weight: 600; }
+  .empty { color: var(--dim); font-style: italic; font-size: 11.5px; padding: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>STATUS</h1>
+  <div class="sub" id="sub">loading… · <a href="/">← rooms</a> · <a href="/usage">usage 📊</a></div>
+  <div id="rooms"></div>
+</div>
+<script>
+const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const kfmt = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n||0);
+function ago(ts) {
+  if (!ts) return 'never';
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+// render TASKBOARD.md's markdown table; skip the separator row
+function boardTable(md) {
+  const rows = String(md||'').split('\n').filter(l => l.trim().startsWith('|'))
+    .map(r => r.split('|').slice(1,-1).map(c => c.trim()))
+    .filter(r => r.length && !r.every(c => /^-*$/.test(c)));
+  if (rows.length < 2) return '';
+  return '<table><tr>' + rows[0].map(c => `<th>${esc(c)}</th>`).join('') + '</tr>' +
+    rows.slice(1).map(r => '<tr>' + r.map(c => `<td>${esc(c)}</td>`).join('') + '</tr>').join('') + '</table>';
+}
+
+async function refresh() {
+  let d;
+  try { d = await (await fetch('/status.json')).json(); } catch { return; }
+  const plan = d.rateLimit
+    ? ` · claude plan: <span class="${d.rateLimit.status === 'allowed' ? 'ok' : 'warn'}">${esc(d.rateLimit.status)}</span>` : '';
+  document.getElementById('sub').innerHTML =
+    `all projects: <b>${kfmt(d.global.tok)}</b> tok · <b>~$${d.global.cost.toFixed(2)}</b>${plan}` +
+    ` · updated ${new Date(d.updated).toLocaleTimeString()} · <a href="/">← rooms</a> · <a href="/usage">usage 📊</a>`;
+
+  // busiest first: a room doing something is what you came here to see
+  const rooms = d.rooms.slice().sort((a, b) =>
+    (b.agents.some(x => x.busy) ? 1 : 0) - (a.agents.some(x => x.busy) ? 1 : 0));
+
+  document.getElementById('rooms').innerHTML = rooms.map(r => {
+    const busy = r.agents.filter(a => a.busy);
+    const pill = !r.running ? '<span class="pill paused">⏸ PAUSED</span>'
+      : busy.length ? `<span class="pill working">⚙ ${esc(busy.map(a => a.name).join(', '))}</span>`
+      : '<span class="pill idle">● idle</span>';
+    const blockers = r.blockers.length
+      ? `<div class="blockers">${r.blockers.map(b => `<div class="b">⚠ ${esc(b)}</div>`).join('')}</div>` : '';
+    const done = r.lastDone
+      ? `<div class="done">${esc(r.lastDone.text)} <span style="color:var(--dim)">— ${ago(r.lastDone.ts)}</span></div>` : '';
+    const asked = r.lastUser
+      ? `<div class="line"><span class="lk">LAST ASK</span><span class="lv">${esc(r.lastUser.text)} <span style="color:var(--dim)">— ${ago(r.lastUser.ts)}</span></span></div>`
+      : '<div class="empty">no messages yet</div>';
+
+    const agents = r.agents.map(a => {
+      const pct = a.limit ? Math.min(100, a.usedGlobal / a.limit * 100) : 0;
+      const col = pct >= 100 ? 'var(--red)' : pct > 90 ? 'var(--red)' : pct > 50 ? 'var(--warn)' : '#28c840';
+      return `<div class="ag">
+        <div class="top"><span class="nm" style="color:${esc(a.color)}">${esc(a.name)}${a.role === 'lead' ? ' 👑' : ''}</span>
+          <span class="dot ${esc(a.status)}"></span></div>
+        <div class="doing">${a.busy ? esc(a.doing || 'thinking…') : 'ready · ' + ago(a.stats.lastActive)}</div>
+        ${a.editing.length ? `<div class="editing">✏ ${esc(a.editing.join(', '))}</div>` : ''}
+        <div class="nums">${a.stats.turns||0} turns · ${a.stats.files||0} files · ${kfmt((a.tokens.in||0)+(a.tokens.out||0))} tok${a.tokens.cost ? ' · ~$'+a.tokens.cost.toFixed(2) : ''}</div>
+        ${a.limit ? `<div class="fuel"><div style="width:${pct}%;background:${col}"></div></div>` : ''}
+      </div>`;
+    }).join('');
+
+    const board = boardTable(r.board);
+    return `<div class="room ${busy.length ? 'busy' : ''}">
+      <div class="rhead">
+        <span class="rname"><a href="/?project=${encodeURIComponent(r.id)}">${esc(r.id)}</a></span>
+        ${pill}
+        <span class="rcost"><b>${kfmt(r.usage.tok)}</b> tok · <b>~$${r.usage.cost.toFixed(2)}</b></span>
+      </div>
+      ${blockers}${asked}${done}
+      <div class="agents">${agents}</div>
+      ${board ? `<details class="board"><summary>TASK BOARD</summary>${board}</details>` : ''}
+    </div>`;
+  }).join('');
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -47,6 +47,7 @@ All optional — the defaults are the safe local setup.
 | `AGENT_TERMINAL_TOKEN` | *(unset)* | Shared secret. **Required** for any non-loopback host. |
 | `CODEX_BIN` | ChatGPT.app's `codex` | Path to the Codex binary. |
 | `GOOSE_BIN` | `goose` | Path to the Goose binary. |
+| `OPENCODE_BIN` | `opencode` | Path to the opencode binary. |
 
 ### Engines
 
@@ -55,6 +56,7 @@ All optional — the defaults are the safe local setup.
 | **Claude** | Claude Code CLI, your Anthropic plan |
 | **Codex** | GPT-5 via the ChatGPT app's `codex` |
 | **Goose** | whatever provider *your* Goose config points at — Ollama, a hosted endpoint, anything |
+| **opencode** | whatever provider *your* opencode config points at (`provider/model`) |
 
 Goose is the easy way to bring local or self-hosted models into a room: configure
 it once with `goose configure`, and the room just spawns it. Leave the model field

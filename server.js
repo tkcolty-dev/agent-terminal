@@ -68,6 +68,7 @@ const CODEX_BIN = process.env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/R
 // child cannot reach, so export the key alongside the server:
 //   TANZU_AI_API_KEY=… node server.js
 const GOOSE_BIN = process.env.GOOSE_BIN || 'goose';
+const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode';
 const MAX_AUTO_TURNS = 3;      // agent-to-agent turns allowed per user message (keep chatter cheap)
 const ROTATE_WORKER_TURNS = 6; // fresh CLI session after this many turns (bounds context growth)
 const ROTATE_LEAD_TURNS = 10;
@@ -424,6 +425,9 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
         while ((idx = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
           if (!line || line[0] !== '{') continue;
+          if (process.env.AGENT_TERMINAL_DEBUG_EVENTS) {
+            try { fs.appendFileSync(process.env.AGENT_TERMINAL_DEBUG_EVENTS, `${this.id} ${line}\n`); } catch {}
+          }
           let ev; try { ev = JSON.parse(line); } catch { continue; }
           const t = this.handleEvent(ev, texts);
           if (t != null) finalText = t;
@@ -646,6 +650,73 @@ function describeGooseTool(call, agent) {
   }
 }
 
+// opencode assigns its own session ids (unlike Goose, where we name them), so
+// resuming is just echoing back the sessionID that every event carries.
+// --auto is the equivalent of Claude's --dangerously-skip-permissions: without it
+// the process blocks forever on an approval prompt nobody is there to answer, and
+// since it renders no output while blocked it looks exactly like a hang.
+// There is no terminal event — the stream simply ends — so handleEvent never
+// returns a final string and spawnTurn joins the collected text on close.
+class OpenCodeAgent extends AgentRunner {
+  command() {
+    // --dir is NOT optional. opencode resolves paths from the inherited PWD rather
+    // than the cwd it is spawned with, so without this every agent writes into
+    // whatever directory the server was started from — for us, the git checkout —
+    // while cheerfully reporting success. Verified: same spawn, cwd=workspace,
+    // wrote to the server's own directory until --dir was passed.
+    const args = ['run', '--auto', '--format', 'json', '--dir', this.room.workspace];
+    const model = this.turnModelOverride || this.modelFlag;
+    if (model) args.push('-m', model);            // provider/model, e.g. tanzu/google/gemma-4-31B
+    if (this.sessionId) args.push('-s', this.sessionId);
+    return { cmd: OPENCODE_BIN, args };
+  }
+
+  handleEvent(ev, texts) {
+    if (ev.sessionID && !this.sessionId) this.sessionId = ev.sessionID;
+    const part = ev.part || {};
+    if (ev.type === 'tool_use') {
+      this.setStatus('working');
+      // A failed tool call must not read as success: without this check a write
+      // that errored still bumped the file counter and looked identical in the
+      // activity feed to one that worked.
+      const failed = part.state?.status === 'error';
+      this.activity(failed
+        ? `⚠ ${part.tool || 'tool'} failed: ${String(part.state?.error || '').slice(0, 70)}`
+        : describeOpenCodeTool(part, this));
+    } else if (ev.type === 'text' && part.text) {
+      texts.push(part.text);
+    } else if (ev.type === 'step_finish') {
+      // one step_finish per model round-trip; accumulate rather than overwrite
+      const t = part.tokens || {}, cache = t.cache || {};
+      this.tokens.in += t.input || 0;
+      this.tokens.out += t.output || 0;
+      this.tokens.cached += cache.read || 0;
+      this.tokens.cost += part.cost || 0;
+      if (t.total) this.sessionCtx = t.total; // latest context size, for size-based rotation
+    }
+    return null;
+  }
+}
+
+function describeOpenCodeTool(part, agent) {
+  const i = part.state?.input || {};
+  const f = p => p ? path.basename(String(p)) : '';
+  switch (part.tool) {
+    case 'write': case 'edit': case 'patch':
+      agent.stats.files++; agent.touchFile(f(i.filePath));
+      return `✏️ ${part.tool === 'write' ? 'writing' : 'editing'} ${f(i.filePath)}`;
+    case 'bash':
+      agent.stats.cmds++;
+      return `$ ${String(i.command || '').slice(0, 80)}`;
+    case 'read': return `👁 reading ${f(i.filePath)}`;
+    case 'glob': case 'grep': return `🔍 searching ${String(i.pattern || '').slice(0, 60)}`;
+    case 'webfetch':
+      agent.stats.searches++;
+      return `🌐 reading ${String(i.url || '').slice(0, 60)}`;
+    default: return `⚙ ${part.tool || 'tool'}`;
+  }
+}
+
 // ---- ROSTER: persisted in agents.json, editable live from the UI.
 const AGENTS_FILE = path.join(DATA_HOME, 'agents.json');
 // Lean default duo — connect more agents anytime via the + connect agent dialog.
@@ -689,7 +760,10 @@ function checkLimitWarnings(agent) {
 }
 
 function buildAgent(room, def) {
-  const Cls = def.type === 'codex' ? CodexAgent : def.type === 'goose' ? GooseAgent : ClaudeAgent;
+  const Cls = def.type === 'codex' ? CodexAgent
+    : def.type === 'goose' ? GooseAgent
+    : def.type === 'opencode' ? OpenCodeAgent
+    : ClaudeAgent;
   return new Cls(room, { ...def });
 }
 // agents.json is a CATALOGUE of engines you own; each room picks its own line-up
@@ -1278,7 +1352,9 @@ ${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => 
         usage: roomUsage(r),
         agents: r.agents.map(a => ({
           id: a.id, name: a.name, color: a.color, model: a.model, status: a.status,
-          type: a instanceof CodexAgent ? 'codex' : a instanceof GooseAgent ? 'goose' : 'claude',
+          type: a instanceof CodexAgent ? 'codex'
+            : a instanceof GooseAgent ? 'goose'
+            : a instanceof OpenCodeAgent ? 'opencode' : 'claude',
           tokens: a.tokens, stats: a.stats,
         })),
       })),
@@ -1427,7 +1503,7 @@ ${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => 
     const room = existingRoom(project);
     if (!room) { res.writeHead(404); res.end('{"error":"no such project"}'); return; }
     const id = slug(name);
-    if (!id || !['claude', 'codex', 'goose'].includes(type)) { res.writeHead(400); res.end('{"error":"bad agent"}'); return; }
+    if (!id || !['claude', 'codex', 'goose', 'opencode'].includes(type)) { res.writeHead(400); res.end('{"error":"bad agent"}'); return; }
     // Re-using a catalogue name is now how you invite an engine you already own into
     // another project, so it is a success case rather than a 409.
     const existing = agentDefs.find(d => d.id === id);
@@ -1443,6 +1519,7 @@ ${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => 
       id, name: name.trim(), color: nextColor(), type,
       model: type === 'codex' ? 'gpt-5 · codex-cli 0.145'
         : type === 'goose' ? (modelFlag || 'goose')
+        : type === 'opencode' ? (modelFlag || 'opencode')
         : (modelFlag || 'claude'),
     };
     if (role === 'lead') def.role = 'lead';

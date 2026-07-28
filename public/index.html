@@ -284,10 +284,11 @@
       <option value="claude">Claude (Claude Code CLI)</option>
       <option value="codex">Codex (GPT-5, ChatGPT app)</option>
       <option value="goose">Goose (your configured provider)</option>
+      <option value="opencode">opencode (your configured provider)</option>
     </select>
     <div id="gooseRow" style="display:none">
       <label>MODEL <span style="text-transform:none;letter-spacing:0">(optional — blank uses your goose default)</span></label>
-      <input id="agGooseModel" placeholder="e.g. ollama/qwen3-coder-next:Q8_0" maxlength="60">
+      <input id="agGooseModel" placeholder="e.g. tanzu/google/gemma-4-31B or ollama/ornith:9b" maxlength="60">
     </div>
     <div id="modelRow">
       <label>CLAUDE MODEL</label>
@@ -818,12 +819,12 @@ document.getElementById('agType').onchange = e => {
   document.getElementById('modelRow').style.display = t === 'claude' ? '' : 'none';
   // Goose is already pointed at a provider by your own goose config, so the model
   // is optional here and free-form (e.g. "tanzu_ai/gemma-4-31B", "ollama/qwen3").
-  document.getElementById('gooseRow').style.display = t === 'goose' ? '' : 'none';
+  document.getElementById('gooseRow').style.display = (t === 'goose' || t === 'opencode') ? '' : 'none';
 };
 document.getElementById('agConnect').onclick = async () => {
   const name = document.getElementById('agName').value.trim();
   const type = document.getElementById('agType').value;
-  const modelFlag = type === 'goose'
+  const modelFlag = (type === 'goose' || type === 'opencode')
     ? document.getElementById('agGooseModel').value.trim()
     : document.getElementById('agModel').value;
   if (!name) return alert('Give the agent a name');

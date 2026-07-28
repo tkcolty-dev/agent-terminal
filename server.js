@@ -68,6 +68,36 @@ const CODEX_BIN = process.env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/R
 // child cannot reach, so export the key alongside the server:
 //   TANZU_AI_API_KEY=… node server.js
 const GOOSE_BIN = process.env.GOOSE_BIN || 'goose';
+// ---------------------------------------------------------------- redaction
+// Agents run real shell commands under --dangerously-skip-permissions, and every
+// word they say is stored verbatim in state.json, streamed to every connected
+// browser, and read back into later prompts. One `cf env`, `bosh int creds.yml`
+// or `cat ~/.aws/credentials` would otherwise write a live credential into a file
+// that outlives the room.
+//
+// Redact rather than block, for the same reason the history filter does: the
+// workspace still holds the real value, so blocking a message would break the
+// room without protecting anything. Over-redacting chat is cheap; leaking is not.
+// Patterns mirror core-services' kl-hist-filter.py.
+const SECRET_TOKENS = new RegExp(
+  '-----BEGIN [A-Z ]*PRIVATE KEY-----' +
+  '|AKIA[0-9A-Z]{16}' +
+  '|ghp_[A-Za-z0-9]{36}' +
+  '|github_pat_[A-Za-z0-9_]{22,}' +
+  '|gho_[A-Za-z0-9]{36}' +
+  '|xox[baprs]-[A-Za-z0-9-]{10,}' +
+  '|xapp-[0-9]-[A-Za-z0-9-]{10,}' +
+  '|sk-ant-[A-Za-z0-9_-]{20,}' +
+  '|eyJ[A-Za-z0-9_-]{20,}\\.eyJ[A-Za-z0-9_-]{20,}', 'g');
+// key-context values: password=…, "api_key": "…", CF_PASSWORD: …
+const SECRET_KEYED =
+  /(["']?(?:secret[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?token|auth[_-]?token|bearer|password|passwd|credhub[_-]?password)["']?\s*[:=]\s*["']?)([A-Za-z0-9+/_.\-]{12,})/gi;
+const REDACTED = '[REDACTED-SECRET]';
+function redactSecrets(s) {
+  if (!s) return s;
+  return String(s).replace(SECRET_TOKENS, REDACTED).replace(SECRET_KEYED, (_, k) => k + REDACTED);
+}
+
 const MAX_AUTO_TURNS = 3;      // agent-to-agent turns allowed per user message (keep chatter cheap)
 const ROTATE_WORKER_TURNS = 6; // fresh CLI session after this many turns (bounds context growth)
 const ROTATE_LEAD_TURNS = 10;
@@ -167,6 +197,9 @@ class AgentRunner {
     this.room.broadcast('status', { agent: this.id, status, detail, model: this.model });
   }
   activity(text) {
+    // activity lines echo real shell commands verbatim (`$ export TOKEN=…`), so
+    // they need the same scrubbing as chat before anyone sees or stores them
+    text = redactSecrets(text);
     if (!/^[📊♨]/u.test(text)) this.lastActivityText = text; // mid-turn heartbeat for teammates
     this.room.broadcast('activity', { agent: this.id, name: this.name, text, ts: Date.now() });
   }
@@ -858,6 +891,11 @@ class Room {
   }
 
   post(from, name, text, img) {
+    // Single choke point: everything that reaches the transcript passes through
+    // here — agent replies, system notices, the user's own typing — so this is
+    // the one place redaction has to happen to cover state.json, the SSE stream
+    // and the inbox that gets replayed into later prompts.
+    text = redactSecrets(text);
     const m = { n: this.messages.length, from, name, text, ts: Date.now() };
     if (img) m.img = img;
     this.messages.push(m);

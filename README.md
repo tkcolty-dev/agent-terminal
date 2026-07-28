@@ -45,6 +45,7 @@ All optional — the defaults are the safe local setup.
 | `AGENT_TERMINAL_SKILLS` | *(unset)* | Directory of `SKILL.md` folders to share with every room. |
 | `AGENT_TERMINAL_HOST` | `127.0.0.1` | Interface to bind. |
 | `AGENT_TERMINAL_TOKEN` | *(unset)* | Shared secret. **Required** for any non-loopback host. |
+| `AGENT_TERMINAL_WORKSPACE_GUARD` | `strict` | `strict` \| `warn` \| `off` — what to do when an agent writes outside its room. |
 | `CODEX_BIN` | ChatGPT.app's `codex` | Path to the Codex binary. |
 | `GOOSE_BIN` | `goose` | Path to the Goose binary. |
 | `OPENCODE_BIN` | `opencode` | Path to the opencode binary. |
@@ -68,6 +69,32 @@ blank to use your Goose default, or set it explicitly (`ollama/qwen3-coder:30b`)
 > ```bash
 > TANZU_AI_API_KEY=… node server.js
 > ```
+
+### Agents are kept inside their room
+
+Every engine runs with its own permission checks bypassed — that's what lets a room
+work — so the server watches where they write. A write outside
+`projects/<id>/workspace/` is announced in the chat and the turn is stopped:
+
+```
+🛑 Codex tried to write outside its workspace: /tmp/guard-escape.txt — turn stopped.
+```
+
+Set `AGENT_TERMINAL_WORKSPACE_GUARD=warn` to allow it with a notice, or `off`.
+
+**Reads are never restricted.** Agents legitimately read system files, interpreters
+and shared skill libraries — the `recall` pattern of keeping team memory outside the
+workspace depends on it.
+
+Two honest limits:
+
+- The guard is **detect-and-stop, not prevent**. Engines report a write after it has
+  happened, so the first one lands; the guard stops the turn before the second.
+  Codex is the exception — it has a real sandbox and refuses outright (though it does
+  permit `/tmp`, which is why the guard still earns its place).
+- Writes made through **shell redirection** (`echo x > /path`) aren't file-tool calls,
+  so the guard doesn't see them. Codex's sandbox blocks those; the other engines
+  don't. Prefer a sandboxed engine for anything unattended.
 
 ### Your rooms live outside the checkout
 

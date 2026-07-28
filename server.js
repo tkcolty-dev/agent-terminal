@@ -125,6 +125,7 @@ const KEEPWARM_MS = 4.5 * 60 * 1000;  // ping resumed sessions just under the 5-
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
 const BRIEF_V = 14;            // bump to re-send the room briefing to existing agents (shared-skills + write-discipline rules)
 const JANITOR_EVERY = 20;      // cheap memory-janitor pass after this many room turns
+const RECEIPTS_KEEP = 60;      // per-turn records retained per room
 const HISTORY_REPLAY = 200;    // messages a connecting client gets (older stay on disk)
 
 // ---------------------------------------------------------------- migration
@@ -205,6 +206,38 @@ class AgentRunner {
   // against the workspace, which is the cwd every engine is given. Returns false
   // when the write escaped and the guard is strict, so callers can skip counting it
   // as ordinary work.
+  // One record per turn: what was asked, who did it on which model, what changed,
+  // what was run, what it cost, how it ended. Answers "who changed this and what
+  // proved it worked?" without reconstructing it from the chat scroll. Built
+  // entirely from state the turn already tracked — nothing extra is measured, and
+  // it is filed for failed and guard-stopped turns too, which are the ones you
+  // most want a record of.
+  fileReceipt(t0, beforeTok, ask, outcome, reply) {
+    const files = [...this.currentEdits];
+    this.room.receipts.push({
+      n: this.room.receipts.length,
+      agent: this.id, name: this.name,
+      model: this.turnModelOverride || this.model,
+      tags: Object.entries(this.capabilities || {}).filter(([, v]) => v === true).map(([k]) => k),
+      started: t0, ms: Date.now() - t0,
+      ask: redactSecrets(String(ask || '').replace(/\s+/g, ' ').slice(0, 300)),
+      files,
+      images: files.filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)),
+      cmds: (this.currentCmds || []).map(c => redactSecrets(c).slice(0, 120)),
+      tokens: {
+        in: (this.tokens.in || 0) - (beforeTok.in || 0),
+        out: (this.tokens.out || 0) - (beforeTok.out || 0),
+        cost: +(((this.tokens.cost || 0) - (beforeTok.cost || 0)).toFixed(4)),
+      },
+      outcome,
+      reply: redactSecrets(String(reply || '').replace(/\s+/g, ' ').slice(0, 300)),
+    });
+    if (this.room.receipts.length > RECEIPTS_KEEP) {
+      this.room.receipts.splice(0, this.room.receipts.length - RECEIPTS_KEEP);
+    }
+    this.room.saveState();
+  }
+
   guardWrite(p, tool) {
     if (GUARD_MODE === 'off' || !p) return true;
     const ws = path.resolve(this.room.workspace);
@@ -235,6 +268,9 @@ class AgentRunner {
     // activity lines echo real shell commands verbatim (`$ export TOKEN=…`), so
     // they need the same scrubbing as chat before anyone sees or stores them
     text = redactSecrets(text);
+    // receipts: every adapter renders a shell command as "$ …", so collecting here
+    // captures them for all four engines without touching each adapter
+    if (/^\$ /.test(text) && this.currentCmds && this.currentCmds.length < 20) this.currentCmds.push(text.slice(2));
     if (!/^[📊♨]/u.test(text)) this.lastActivityText = text; // mid-turn heartbeat for teammates
     this.room.broadcast('activity', { agent: this.id, name: this.name, text, ts: Date.now() });
   }
@@ -259,6 +295,15 @@ RULES OF THE ROOM:
 9. SEE AND TEST YOUR WORK — never declare something done without testing it:
    - The live preview is http://localhost:${PORT}/preview/${this.room.id}/ .
    - Claude-family agents: you get real browser tools ONLY on a turn whose task is tagged [browser]. On such a turn, load the preview, click through it, check the console, and SAVE SCREENSHOTS as .png files in the workspace — every image saved there is automatically shown to the user and teammates in the chat. On any other turn you have no browser: do not promise a screenshot you cannot take; say what you verified by reading code and ask for a [browser] turn if a visual check matters.
+   - ON A [browser] TURN, do all of this in the ONE turn — a second browser turn costs as much as the first:
+     (a) WAIT FOR READY, never a fixed pause: wait until the element you care about exists, the text
+         appears, or the network goes quiet. A screenshot of a half-loaded page proves nothing and is
+         the main source of flaky "it looked fine" verdicts.
+     (b) REPORT THE CONSOLE AND NETWORK, not just the picture: state the console error count and any
+         failed requests explicitly, even when zero ("0 console errors, 0 failed requests"). A page
+         that looks right while throwing on every frame is the exact failure a screenshot hides.
+     (c) CHECK THE SIZES THAT MATTER in the same turn — phone, tablet and desktop widths — rather
+         than one turn per size. Say which widths you checked.
    - Codex: verify with real commands — curl the preview URL, run node scripts against your code, syntax-check. For visual checks, ask a Claude teammate to browser-test and screenshot.
 10. WEB SEARCH: you can search the live web (Claude-family: WebSearch/WebFetch tools; Codex: native web_search). Use it for docs, APIs, assets, and ideas instead of guessing.
 11. YOUR PRIVATE MEMORY: the file .notes/${this.name}.md in the workspace is YOURS alone — plans, learnings, todos, gotchas. Read it when you start a task, update it as you work. MEMORY.md stays for team-wide facts.
@@ -272,7 +317,11 @@ RULES OF THE ROOM:
    - If a message needs NOTHING from you, reply with exactly [SKIP] — it will not be posted and wakes nobody.
    - NEVER post acknowledgment-only replies ("ok", "got it", "holding", "standing by").
    - Bundle your work: do EVERYTHING needed in one turn, then ONE short reply (≤3 sentences). Ask all your questions at once instead of back-and-forth.
-   - Don't re-read files you already know, don't re-verify what a teammate verified, don't re-explain what's already in chat.` +
+   - Don't re-read files you already know, don't re-verify what a teammate verified, don't re-explain what's already in chat.
+   - QUICK QUESTIONS: to ask ONE teammate a short factual question, write "[q] @Name <question>".
+     That wakes only them, on a cheap fast model, with a tiny budget — and it does NOT wake the lead.
+     Answer a [q] with "[a] <answer>" and nothing else; an [a] wakes nobody and ends the exchange.
+     Use it for "what did you name the export?", not for anything needing work or a decision.` +
    // Only stated when a shared library is actually mounted — otherwise it would be
    // describing tools the agent doesn't have, which is the failure BRIEF_V 11 fixed.
    (SKILLS_DIR ? `
@@ -303,6 +352,8 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
   [trivial] = one-liners/renames/acks → runs on a cheap fast model
   [normal] = standard implementation (default)   [hard] = genuinely tricky work
   [browser] = needs browser testing tools   [web] = needs web search
+  [q] = a one-line question for ONE teammate (cheap model, doesn't wake you) — workers use this between themselves
+- A [browser] worker owes you three things in ONE turn, not a screenshot alone: console error count and failed requests (even if zero), which viewport widths were checked, and how it waited for the page to settle. If a report is just an image, ask for those before accepting it.
   Untagged turns run LEAN (files+shell only) — a worker missing a capability reports it once and you re-issue with the tag.
 - Size every task so a worker can FINISH IT IN ONE TURN. Bigger jobs = several short rounds.
 - Assign both workers in ONE message when tasks are independent, so they run in parallel.
@@ -388,6 +439,7 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       roblox: this.room.robloxMode,
       trivial: /\[trivial\]/.test(t),
       hard: /\[hard\]/.test(t),
+      quick: /\[q\]/.test(t),   // teammate-to-teammate question: cheap model, tiny budget
     };
   }
 
@@ -399,11 +451,17 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
     this.stats.turns++;
     this.stats.lastActive = t0;
     this.currentEdits = new Set();
+    this.currentCmds = [];
     // parse capability/model hints from what this agent is about to read
     const pendingText = this.room.messages.slice(this.seenUpTo)
       .filter(m => m.from !== this.id).map(m => m.text).join('\n');
+    // what a person or teammate actually asked for — room plumbing ("X left this
+    // project") is not an assignment and just clutters the receipt
+    const askText = this.room.messages.slice(this.seenUpTo)
+      .filter(m => m.from !== this.id && m.from !== 'system').map(m => m.text).join(' ');
     this.capabilities = this.turnCapabilities(pendingText);
-    this.turnModelOverride = (this.capabilities.trivial && this.role !== 'lead') ? CHEAP_MODEL : null;
+    this.turnModelOverride = this.capabilities.quick ? CHEAP_MODEL
+      : (this.capabilities.trivial && this.role !== 'lead') ? CHEAP_MODEL : null;
     // lead-turn downgrade: pure routing/review wakes (no user message pending) don't need the flagship model
     if (this.role === 'lead' && !this.modelFlag) {
       const hasUserMsg = this.room.messages.slice(this.seenUpTo).some(mm => mm.from === 'user');
@@ -433,7 +491,9 @@ YOUR SPECIAL ROLE — YOU ARE THE LEAD (ORCHESTRATOR) 👑:
       // [SKIP] = agent explicitly had nothing to say — post nothing, wake nobody
       if (text && !text.toUpperCase().startsWith('[SKIP]')) this.room.post(this.id, this.name, text);
       else this.activity('⏭ turn ended with nothing to post'); // visible, so silence is never a mystery
+      this.fileReceipt(t0, beforeTok, askText, text ? (text.toUpperCase().startsWith('[SKIP]') ? 'skipped' : 'ok') : 'silent', text);
     } catch (err) {
+      this.fileReceipt(t0, beforeTok, askText, this.guardTripped ? 'stopped-by-guard' : 'failed', String(err).slice(0, 200));
       // A guard kill lands here as a non-zero exit, but it is not a crash to retry:
       // the agent did read its messages, and redelivering them would just re-run the
       // same escape. It has already been announced, so say nothing more.
@@ -543,7 +603,7 @@ class ClaudeAgent extends AgentRunner {
   command() {
     const caps = this.capabilities || {};
     // tag-enforced turn budgets: [trivial] gets 4 tool-steps, [hard] gets 24, default 12
-    const maxTurns = caps.trivial ? '4' : caps.hard ? '24' : '12';
+    const maxTurns = caps.quick ? '2' : caps.trivial ? '4' : caps.hard ? '24' : '12';
     // --setting-sources project: load THIS project's settings, never the operator's
     // ~/.claude. Without it every agent inherits the operator's personal CLAUDE.md,
     // hooks and plugins — leaking private notes into the room, bleeding a foreign
@@ -898,6 +958,26 @@ function isSmallTalk(t) { return isAck(t) || isGreeting(t); }
 // skills along with everything else. A project-level .claude/skills survives it.
 // Conveniently this is also the path Goose and opencode look in, so one link
 // serves every engine once those adapters exist.
+// Real confinement for opencode, as opposed to the after-the-fact guard: a
+// project-level permission rule it enforces itself, so an escape never happens
+// rather than being caught once it has. Written per room because it is scoped to
+// that room's directory. Merged over the operator's own opencode config, so their
+// providers and models are untouched.
+// Trade-off worth knowing: a denied write makes opencode stall rather than error,
+// so the turn runs to TURN_TIMEOUT_MS. A stalled escape still beats a successful one.
+function writeOpenCodeConfine(workspace) {
+  const dir = path.join(workspace, '.opencode');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'opencode.json'), JSON.stringify({
+      $schema: 'https://opencode.ai/config.json',
+      permission: { external_directory: 'deny' },
+    }, null, 1));
+  } catch (err) {
+    console.warn(`⚠ could not write opencode confinement for ${workspace}: ${err.message}`);
+  }
+}
+
 function linkSkills(workspace) {
   if (!SKILLS_DIR) return;
   const dir = path.join(workspace, '.claude');
@@ -931,7 +1011,9 @@ class Room {
       fs.writeFileSync(boardFile, `# Task Board — ${id}\n\n| task | owner | status | files |\n|------|-------|--------|-------|\n`);
     }
     linkSkills(this.workspace); // no-op unless AGENT_TERMINAL_SKILLS is set
+    if (GUARD_MODE !== 'off') writeOpenCodeConfine(this.workspace);
     this.messages = [];
+    this.receipts = [];   // one record per completed turn (see fileReceipt)
     this.clients = new Set();
     const saved = this.readState();
     // Rooms saved before per-room membership existed have no `members` key — those
@@ -973,6 +1055,7 @@ class Room {
     try {
       if (!s) return;
       this.messages.push(...(s.messages || []));
+      this.receipts.push(...(s.receipts || []));
       if (s.talkMode) this.talkMode = s.talkMode;
       this.robloxMode = !!s.robloxMode;
       for (const sa of s.agents || []) {
@@ -1001,6 +1084,7 @@ class Room {
         robloxMode: this.robloxMode,
         members: this.members,
         messages: this.messages,
+        receipts: this.receipts,
         agents: this.agents.map(a => ({
           id: a.id, sessionId: a.sessionId, briefedV: a.briefedV || 0, seenUpTo: a.seenUpTo,
           tokens: a.tokens, stats: a.stats, model: a.model, sessionTurns: a.sessionTurns || 0,
@@ -1129,6 +1213,10 @@ Preserve every fact that is still current. Do not add commentary. Reply with jus
     if (m.from === 'system') return agent.role === 'lead' && m.text.startsWith('⚠');
     // small-talk gate: acks and greetings never wake a model — zero tokens
     if (isSmallTalk(m.text)) return false;
+    // quick-question lane: an [a] answer is addressed to the asker and closes the
+    // exchange. Without this the reply would wake the lead, which is exactly the
+    // three-frontier-turn cost the lane exists to avoid.
+    if (/^\s*\[a\]/i.test(m.text)) return false;
     // task dependencies: "[after:Codex]" holds this wake until Codex posts a reply later than the assignment
     const dep = m.text.match(/\[after:\s*@?([A-Za-z0-9_-]+)\]/i);
     if (dep) {
@@ -1174,7 +1262,10 @@ Preserve every fact that is still current. Do not add commentary. Reply with jus
       // turns meant a single round (lead + 2 workers = 3) hit the cap exactly when the
       // lead was due to close the loop, so the finish line and its banner never fired
       // — and workers filled the silence by inventing unassigned scope.
-      const exempt = userWake || agent.role === 'lead';
+      // a [q] exchange runs on the cheap model with a 2-step budget, so it must not
+      // eat the round's auto-turn allowance the way real work does
+      const quick = wakers.some(m => /\[q\]/i.test(m.text));
+      const exempt = userWake || agent.role === 'lead' || quick;
       if (!exempt) {
         if (this.autoTurns >= MAX_AUTO_TURNS) {
           if (!this.capNoticeShown) {
@@ -1442,6 +1533,7 @@ const server = http.createServer(async (req, res) => {
         blockers,
         board,
         usage: roomUsage(r),
+        receipts: r.receipts.slice(-12).reverse(), // newest first; full set lives in state.json
         agents: r.agents.map(a => ({
           id: a.id, name: a.name, color: a.color, role: a.role || null,
           model: a.model, status: a.status, busy: a.busy,
@@ -1494,6 +1586,7 @@ ${warns.length ? `<p style="color:#ff5f57">recent problems:<br>${warns.map(w => 
       rooms: [...rooms.values()].map(r => ({
         id: r.id,
         usage: roomUsage(r),
+        receipts: r.receipts.slice(-12).reverse(), // newest first; full set lives in state.json
         agents: r.agents.map(a => ({
           id: a.id, name: a.name, color: a.color, model: a.model, status: a.status,
           type: a instanceof CodexAgent ? 'codex'

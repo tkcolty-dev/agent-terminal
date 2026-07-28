@@ -31,6 +31,18 @@ at its token limit, one stopped for writing outside its workspace, or the auto-c
 cap being hit all appear at the top of the card in red. `/status.json` serves the same
 data if you'd rather script against it.
 
+**Recent turns** on the same card is the receipt for each turn: what was asked, who did
+it on which model, which files changed, which commands ran, what it cost, and how it
+ended — including turns that failed or were stopped by the guard, which are the ones
+you most want a record of.
+
+### Workers can ask each other cheap questions
+
+`[q] @Name <question>` wakes only that teammate, on the cheap model, with a two-step
+budget — and does **not** wake the lead. They answer `[a] <answer>`, which wakes nobody
+and closes the exchange. Before this, a one-word answer between two workers cost three
+frontier turns.
+
 ### Task tags control cost
 
 The lead tags every assignment, and the server routes on the tag:
@@ -42,6 +54,7 @@ The lead tags every assignment, and the server routes on the tag:
 | `[hard]` | genuinely tricky work |
 | `[browser]` | grants browser tools for that turn only |
 | `[web]` | grants web search for that turn only |
+| `[q]` | one short question for ONE teammate — cheap model, tiny budget, doesn't wake the lead |
 
 Untagged turns run lean — files and shell only. That lean profile is roughly **40%
 less context** than a full-surface turn, so keep tags off unless a task needs them.

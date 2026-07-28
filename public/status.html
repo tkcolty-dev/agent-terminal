@@ -55,6 +55,18 @@
 
   details.board { margin-top: 12px; }
   details.board summary { color: var(--dim); font-size: 10.5px; letter-spacing: 1.5px; cursor: pointer; }
+
+  /* receipts — what each turn actually did */
+  .rcpt { border-left: 2px solid var(--border); padding: 7px 0 7px 11px; margin-top: 9px; font-size: 11px; }
+  .rcpt.ok { border-color: #28c840; } .rcpt.failed, .rcpt['data-o'="stopped-by-guard"] { border-color: var(--red); }
+  .rcpt.skipped, .rcpt.silent { border-color: var(--border); opacity: .65; }
+  .rcpt .rh { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .rcpt .who { font-weight: 700; }
+  .rcpt .meta { color: var(--dim); font-size: 10px; margin-left: auto; white-space: nowrap; }
+  .rcpt .ask { color: var(--dim); margin-top: 3px; }
+  .rcpt .did { margin-top: 3px; }
+  .rcpt code { background: var(--bg); padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+  .tagchip { font-size: 9px; letter-spacing: .5px; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--dim); }
   table { border-collapse: collapse; width: 100%; margin-top: 8px; }
   td, th { border: 1px solid var(--border); padding: 4px 8px; font-size: 11px; text-align: left; }
   th { color: var(--dim); font-weight: 600; }
@@ -127,6 +139,27 @@ async function refresh() {
       </div>`;
     }).join('');
 
+    // receipts: newest first, so "what just happened" is the first thing you read
+    const receipts = (r.receipts || []).map(t => {
+      const did = [];
+      if (t.files.length) did.push(`✏️ ${t.files.map(f => `<code>${esc(f)}</code>`).join(' ')}`);
+      if (t.cmds.length) did.push(`$ ${t.cmds.length} command${t.cmds.length > 1 ? 's' : ''}`);
+      if (t.images.length) did.push(`📸 ${t.images.length}`);
+      if (!did.length) did.push('<span style="color:var(--dim)">no file or command changes</span>');
+      const cost = t.tokens.cost ? ` · ~$${t.tokens.cost.toFixed(3)}` : '';
+      const tags = (t.tags || []).filter(x => x !== 'roblox').map(x => `<span class="tagchip">${esc(x)}</span>`).join(' ');
+      return `<div class="rcpt ${esc(t.outcome)}">
+        <div class="rh"><span class="who" style="color:${esc((r.agents.find(a => a.id === t.agent) || {}).color || 'var(--text)')}">${esc(t.name)}</span>
+          ${tags}
+          <span style="color:var(--dim)">${esc(t.outcome)}</span>
+          <span class="meta">${Math.round(t.ms/1000)}s · ${kfmt(t.tokens.in + t.tokens.out)} tok${cost} · ${ago(t.started)}</span></div>
+        ${t.ask ? `<div class="ask">asked: ${esc(t.ask.slice(0,150))}</div>` : ''}
+        <div class="did">${did.join(' &nbsp;·&nbsp; ')}</div>
+        ${t.reply ? `<div class="ask">said: ${esc(t.reply.slice(0,150))}</div>` : ''}
+        ${t.cmds.length ? `<details><summary style="color:var(--dim);font-size:10px;cursor:pointer">commands</summary>${t.cmds.map(c => `<div><code>${esc(c)}</code></div>`).join('')}</details>` : ''}
+      </div>`;
+    }).join('');
+
     const board = boardTable(r.board);
     return `<div class="room ${busy.length ? 'busy' : ''}">
       <div class="rhead">
@@ -137,6 +170,7 @@ async function refresh() {
       ${blockers}${asked}${done}
       <div class="agents">${agents}</div>
       ${board ? `<details class="board"><summary>TASK BOARD</summary>${board}</details>` : ''}
+      ${receipts ? `<details class="board" ${busy.length ? 'open' : ''}><summary>RECENT TURNS — what each one actually did</summary>${receipts}</details>` : ''}
     </div>`;
   }).join('');
 }

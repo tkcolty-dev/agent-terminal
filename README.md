@@ -20,6 +20,17 @@ No dependencies — just Node and the agent CLIs you already have installed.
   The agents maintain both themselves.
 - Screenshots saved into the workspace are posted into the chat automatically.
 
+### Where are we? — `/status`
+
+`http://localhost:4600/status` answers that without scrolling the chat. One card per
+room, busiest first, refreshing every 5s: what you last asked, the lead's last
+`✅ DONE`, what each agent is doing *right now*, its fuel gauge, and the task board.
+
+Blockers are stated rather than left to be inferred — a paused room, an agent benched
+at its token limit, one stopped for writing outside its workspace, or the auto-chat
+cap being hit all appear at the top of the card in red. `/status.json` serves the same
+data if you'd rather script against it.
+
 ### Task tags control cost
 
 The lead tags every assignment, and the server routes on the tag:

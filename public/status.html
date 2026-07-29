@@ -58,7 +58,11 @@
 
   /* receipts — what each turn actually did */
   .rcpt { border-left: 2px solid var(--border); padding: 7px 0 7px 11px; margin-top: 9px; font-size: 11px; }
-  .rcpt.ok { border-color: #28c840; } .rcpt.failed, .rcpt['data-o'="stopped-by-guard"] { border-color: var(--red); }
+  /* outcome maps to the class on .rcpt, so these are plain class selectors.
+     A malformed compound here silently drops the WHOLE rule — CSS selector lists
+     are not forgiving — which is how `failed` lost its red border too. */
+  .rcpt.ok { border-color: #28c840; }
+  .rcpt.failed, .rcpt.stopped-by-guard { border-color: var(--red); }
   .rcpt.skipped, .rcpt.silent { border-color: var(--border); opacity: .65; }
   .rcpt .rh { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .rcpt .who { font-weight: 700; }

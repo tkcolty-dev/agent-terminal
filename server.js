@@ -123,7 +123,7 @@ const INBOX_MAX_CHARS = 6000;  // …capped at this many chars
 const CHEAP_MODEL = 'claude-haiku-4-5-20251001'; // [trivial]-tagged tasks route here
 const KEEPWARM_MS = 4.5 * 60 * 1000;  // ping resumed sessions just under the 5-min cache TTL
 const TURN_TIMEOUT_MS = 15 * 60 * 1000;
-const BRIEF_V = 14;            // bump to re-send the room briefing to existing agents (shared-skills + write-discipline rules)
+const BRIEF_V = 15;            // bump to re-send the room briefing (v15 = quick-question lane + browser verification discipline)
 const JANITOR_EVERY = 20;      // cheap memory-janitor pass after this many room turns
 const RECEIPTS_KEEP = 60;      // per-turn records retained per room
 const HISTORY_REPLAY = 200;    // messages a connecting client gets (older stay on disk)

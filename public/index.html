@@ -103,6 +103,39 @@
   }
   .drop-overlay[hidden] { display: none; }
 
+  /* voice input */
+  .mic { background: var(--panel2); border: 1px solid var(--border); border-radius: 50%; width: 34px; height: 34px; font-size: 16px; cursor: pointer; flex: none; display: flex; align-items: center; justify-content: center; }
+  .mic.listening { background: rgba(255,95,87,.15); border-color: #ff5f57; animation: pulse 1s infinite; }
+  .mic[hidden] { display: none; }
+
+  /* ---- phone layout ---- */
+  .menu-btn { display: none; }
+  .side-backdrop { display: none; }
+  @media (max-width: 840px) {
+    body { display: block; }
+    .window { margin: 0; border: none; border-radius: 0; height: 100dvh; max-width: none; box-shadow: none; }
+    .titlebar { padding: 8px 10px; }
+    .title { display: none; }
+    .dot { display: none; }
+    .work-chip { font-size: 10px; padding: 3px 8px; margin-right: auto; }
+    .titlebar .btn { padding: 5px 8px; font-size: 11px; margin-left: 4px; }
+    .menu-btn { display: flex; align-items: center; justify-content: center; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; color: var(--green); width: 34px; height: 30px; font-size: 15px; cursor: pointer; }
+    /* sidebar becomes a slide-over drawer */
+    .side { position: fixed; left: 0; top: 0; bottom: 0; width: 280px; max-width: 85vw; z-index: 40;
+      transform: translateX(-105%); transition: transform .22s ease; box-shadow: 20px 0 60px rgba(0,0,0,.55); }
+    .side.open { transform: none; }
+    .side-backdrop.show { display: block; position: fixed; inset: 0; z-index: 39; background: rgba(0,0,0,.5); }
+    /* live build becomes a full-screen overlay */
+    .preview-pane { position: fixed; inset: 0; width: auto; min-width: 0; z-index: 35; }
+    .board { max-height: 110px; }
+    .nowstrip { font-size: 11.5px; padding: 6px 10px; }
+    .chat { padding: 12px 12px; }
+    #input { font-size: 16px; } /* stops iOS zoom-on-focus */
+    .talk-sel { font-size: 10px; padding: 3px 4px; }
+    .usagebar { font-size: 10px; gap: 6px 10px; padding: 5px 10px; }
+    .chat-img { max-width: 100%; }
+  }
+
   /* usage bar */
   .usagebar { display: flex; gap: 8px 18px; align-items: center; flex-wrap: wrap; padding: 6px 16px; border-top: 1px solid var(--border); background: var(--panel); font-size: 11px; color: var(--dim); }
   .usagebar > span { white-space: nowrap; }
@@ -204,6 +237,7 @@
 <body>
 <div class="window">
   <div class="titlebar">
+    <button class="menu-btn" id="menuBtn" title="agents & files">☰</button>
     <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
     <div class="title">AGENT TERMINAL — MULTI-AGENT ROOM</div>
     <span class="work-chip" id="workChip">● idle</span>
@@ -215,7 +249,8 @@
   </div>
   <div class="tabs" id="tabs"></div>
   <div class="main">
-    <div class="side">
+    <div class="side-backdrop" id="sideBackdrop"></div>
+    <div class="side" id="sidePanel">
       <div class="side-tabs">
         <div class="side-tab active" data-pane="agents">AGENTS</div>
         <div class="side-tab" data-pane="files">FILES</div>
@@ -244,6 +279,7 @@
       <div class="chat" id="chat"></div>
       <div class="inputbar">
         <span class="prompt-char">❯</span>
+        <button class="mic" id="micBtn" title="talk instead of type">🎤</button>
         <input id="input" placeholder="Tell your agents what to build… (they'll coordinate with each other)" autofocus>
         <select class="talk-sel" id="talkSel" title="how agents take turns">
           <option value="turns">🗣 one at a time</option>
@@ -254,7 +290,7 @@
       <div class="usagebar" id="usagebar">💰 usage: waiting for first turn…</div>
     </div>
     <div class="preview-pane" id="previewPane" hidden>
-      <div class="preview-head">LIVE BUILD<span class="reload" id="reloadBtn">↻ reload</span><a href="/preview/" target="_blank" id="previewTab">open in tab ↗</a></div>
+      <div class="preview-head">LIVE BUILD<span class="reload" id="reloadBtn">↻ reload</span><a href="/preview/" target="_blank" id="previewTab">open in tab ↗</a><span class="reload" id="previewClose" style="color:#ff5f57;margin-left:12px">✕ close</span></div>
       <iframe id="previewFrame" src="/preview/"></iframe>
     </div>
   </div>
@@ -707,7 +743,8 @@ function previewURL() { return '/preview/' + encodeURIComponent(currentProject) 
 function schedulePreviewReload(files, switching) {
   const hasIndex = files.some(f => f.path === 'index.html' || f.path.endsWith('/index.html'));
   if (switching && !hasIndex) { pane.hidden = true; return; } // new project with no build yet
-  if (hasIndex && pane.hidden && !userClosedPane) pane.hidden = false; // auto-open when a build appears
+  // auto-open only on wide screens — on a phone the pane is a full-screen overlay
+  if (hasIndex && pane.hidden && !userClosedPane && window.innerWidth > 840) pane.hidden = false;
   if (pane.hidden) return;
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
@@ -721,6 +758,7 @@ document.getElementById('previewBtn').onclick = () => {
   if (!pane.hidden) frame.src = previewURL();
 };
 document.getElementById('reloadBtn').onclick = () => { frame.src = previewURL(); };
+document.getElementById('previewClose').onclick = () => { pane.hidden = true; userClosedPane = true; };
 
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && input.value.trim()) {
@@ -802,6 +840,46 @@ window.addEventListener('drop', e => {
   e.preventDefault(); dragDepth = 0; document.getElementById('dropOverlay').hidden = true;
   if (e.dataTransfer?.files?.length) uploadFiles([...e.dataTransfer.files]);
 });
+
+// ---- voice input (Web Speech API — works in Chrome and iPhone/iPad Safari)
+(() => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const btn = document.getElementById('micBtn');
+  if (!SR) { btn.hidden = true; return; } // browser can't do speech — hide the mic
+  let rec = null, baseText = '';
+  const stop = () => { if (rec) { try { rec.stop(); } catch {} } };
+  btn.onclick = () => {
+    if (rec) { stop(); return; } // tap again to stop
+    rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = 'en-US';
+    baseText = input.value ? input.value + ' ' : '';
+    btn.classList.add('listening');
+    rec.onresult = e => {
+      let final = '', interim = '';
+      for (const r of e.results) (r.isFinal ? final += r[0].transcript : interim += r[0].transcript);
+      input.value = (baseText + final + interim).replace(/\s+/g, ' ');
+    };
+    rec.onerror = () => stop();
+    rec.onend = () => {
+      btn.classList.remove('listening');
+      rec = null;
+      input.focus(); // words land in the box — you press Enter to send, so mishears never fire off unchecked
+    };
+    try { rec.start(); } catch { btn.classList.remove('listening'); rec = null; }
+  };
+})();
+
+// ---- phone drawer (☰ opens agents/files panel)
+const sidePanel = document.getElementById('sidePanel');
+const sideBackdrop = document.getElementById('sideBackdrop');
+function closeDrawer() { sidePanel.classList.remove('open'); sideBackdrop.classList.remove('show'); }
+document.getElementById('menuBtn').onclick = () => {
+  sidePanel.classList.toggle('open');
+  sideBackdrop.classList.toggle('show', sidePanel.classList.contains('open'));
+};
+sideBackdrop.onclick = closeDrawer;
 
 // ---- sound mute toggle
 const sndBtn = document.getElementById('sndBtn');
